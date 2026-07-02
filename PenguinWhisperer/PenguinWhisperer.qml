@@ -256,9 +256,17 @@ PluginComponent {
     }
 
     // Loose comparison for spoken snippet triggers: case, punctuation, and
-    // extra whitespace don't count
+    // extra whitespace don't count. Char-by-char like hasSpeechChars because
+    // QML's V4 engine silently no-ops \p{L}/\p{N} regex property escapes.
     function normalizePhrase(s) {
-        return s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+        let out = ""
+        for (const ch of s.toLowerCase()) {
+            const isLetter = ch.toLowerCase() !== ch.toUpperCase()
+            const isDigit = ch >= "0" && ch <= "9"
+            const isUncased = ch.charCodeAt(0) > 0x2E80  // CJK etc.
+            out += (isLetter || isDigit || isUncased) ? ch : " "
+        }
+        return out.replace(/\s+/g, " ").trim()
     }
 
     function matchSnippet(text) {
@@ -438,8 +446,11 @@ PluginComponent {
               + "breaks on your own: pauses and topic changes are NOT breaks, and the whole output must be "
               + "a single line unless the speaker explicitly commands a break. Preserve the meaning, tone, and "
               + "language of the speaker. Output ONLY the final text, with no preamble, quotes, or commentary."
+        // Snippet triggers ride along so they transcribe verbatim and the
+        // whole-dictation trigger match can fire on AI transcripts too
         const words = (customWords || [])
             .map(w => typeof w === "string" ? w : (w && w.word ? w.word : ""))
+            .concat((snippets || []).map(s => s && s.trigger ? s.trigger : ""))
             .map(w => w.trim())
             .filter(w => w.length > 0)
         if (words.length > 0)
@@ -529,9 +540,10 @@ PluginComponent {
                             root.noSpeech()
                             return
                         }
-                        // Snippets are a local-dictation feature only — no
-                        // matching against AI transcriptions
-                        root.deliver(text)
+                        // Snippets fire here too, but only when the entire
+                        // dictation matches a trigger — never inside longer text
+                        const snippet = root.matchSnippet(text)
+                        root.deliver(snippet ? snippet.text.replace(/\\n/g, "\n") : text)
                         return
                     }
                 } catch (e) {}
