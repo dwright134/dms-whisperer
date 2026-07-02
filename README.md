@@ -28,8 +28,17 @@ Mod+Shift+D / click mic pill
   keyboard icon to re-type at cursor), clear history, open settings.
 - **Settings → Plugins → Penguin Whisperer**: model manager (download/delete/select tiny.en,
   base.en, small.en, small multilingual, medium.en straight from Hugging Face with progress),
-  language (en/auto), type-at-cursor / clipboard / sound-cue toggles, whisper-cli path.
+  custom vocabulary, language (en/auto), type-at-cursor / clipboard / sound-cue toggles,
+  whisper-cli path.
+- **Custom vocabulary**: add names, jargon, and tricky spellings in settings; they're passed
+  to whisper as an initial prompt (`--prompt` + `--carry-initial-prompt`) to bias decoding
+  toward the right spellings. Keep the list to a few dozen entries — the prompt is capped at
+  ~224 tokens and biasing weakens as it grows.
 - **Sound cues**: freedesktop chimes on start / done / error (toggleable).
+- **Silence gate**: if the recording's peak level is below -40 dB, transcription is skipped
+  entirely (no whisper hallucinations typed into the focused window). Non-speech tokens are
+  also suppressed (`--suppress-nst`) and bracketed annotations scrubbed; output with no real
+  words is dropped.
 - **Keybind**: `Mod+Shift+D` → toggle dictation (in `~/.config/niri/dms/binds.kdl`).
 - **IPC**: `dms ipc call penguinWhisperer toggle|start|stop|status`.
 - Recording auto-stops after 5 minutes.

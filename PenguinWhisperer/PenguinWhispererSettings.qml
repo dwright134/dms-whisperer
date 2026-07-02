@@ -231,6 +231,16 @@ PluginSettings {
 
     // ── Behaviour ──────────────────────────────────────────────────────────
 
+    ListSettingWithInput {
+        settingKey: "customWords"
+        label: "Custom vocabulary"
+        description: "Names, jargon, and unusual spellings the transcriber should know. Fed to whisper as an initial prompt — keep the list short (a few dozen words) for best effect."
+        defaultValue: []
+        fields: [
+            {id: "word", label: "Word or phrase", placeholder: "DankMaterialShell", width: 280, required: true}
+        ]
+    }
+
     SelectionSetting {
         settingKey: "language"
         label: "Language"
