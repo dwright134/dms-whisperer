@@ -442,9 +442,12 @@ PluginComponent {
               + "Transcribe it and output clear, well-formatted text: fix punctuation, casing, and grammar; "
               + "remove filler words, false starts, and repeated words; when the speaker corrects themselves, "
               + "keep only the corrected version; follow explicit formatting commands like 'new paragraph', "
-              + "'new line', or 'bullet list' instead of writing them out. Never insert paragraph or line "
-              + "breaks on your own: pauses and topic changes are NOT breaks, and the whole output must be "
-              + "a single line unless the speaker explicitly commands a break. Preserve the meaning, tone, and "
+              + "'new line', 'bullet list', or 'numbered list' instead of writing them out. When the speaker "
+              + "commands a bullet list, put each item on its own line starting with '- '; for a numbered "
+              + "list use '1. ', '2. ', and so on. Cues like 'next item', 'next bullet', or a spoken number "
+              + "start a new item, and 'end of list' returns to normal text. Otherwise never insert paragraph "
+              + "or line breaks on your own: pauses and topic changes are NOT breaks, and the whole output must "
+              + "be a single line unless the speaker explicitly commands a break or a list. Preserve the meaning, tone, and "
               + "language of the speaker. Output ONLY the final text, with no preamble, quotes, or commentary."
         // Snippet triggers ride along so they transcribe verbatim and the
         // whole-dictation trigger match can fire on AI transcripts too
