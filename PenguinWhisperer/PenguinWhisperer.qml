@@ -308,6 +308,35 @@ PluginComponent {
         }
     }
 
+    // Speaker-style idle icon: three vertical bars, middle full height,
+    // sides half height
+    component WaveIcon: Item {
+        id: wave
+        property color barColor: Theme.surfaceText
+        implicitWidth: Theme.iconSize - 6
+        implicitHeight: Theme.iconSize - 6
+        width: implicitWidth
+        height: implicitHeight
+
+        Row {
+            anchors.centerIn: parent
+            spacing: Math.max(2, Math.round(wave.width * 0.15))
+
+            Repeater {
+                model: [0.5, 1.0, 0.5]
+
+                Rectangle {
+                    required property real modelData
+                    width: Math.max(3, Math.round(wave.width * 0.17))
+                    height: Math.max(4, Math.round(wave.height * 0.95 * modelData))
+                    radius: width / 2
+                    color: wave.barColor
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+            }
+        }
+    }
+
     pillClickAction: () => root.toggleRecording()
 
     // triggerPopout() routes into pillClickAction when set, so blank it
@@ -323,8 +352,15 @@ PluginComponent {
         Row {
             spacing: Theme.spacingXS
 
+            WaveIcon {
+                visible: root.sttState === "idle"
+                barColor: root.pillColor()
+                anchors.verticalCenter: parent.verticalCenter
+            }
+
             DankIcon {
                 id: hIcon
+                visible: root.sttState !== "idle"
                 name: root.pillIcon()
                 size: Theme.iconSize - 6
                 color: root.pillColor()
@@ -353,8 +389,15 @@ PluginComponent {
         Column {
             spacing: Theme.spacingXS
 
+            WaveIcon {
+                visible: root.sttState === "idle"
+                barColor: root.pillColor()
+                anchors.horizontalCenter: parent.horizontalCenter
+            }
+
             DankIcon {
                 id: vIcon
+                visible: root.sttState !== "idle"
                 name: root.pillIcon()
                 size: Theme.iconSize - 6
                 color: root.pillColor()

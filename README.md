@@ -19,8 +19,9 @@ Mod+Shift+D / click mic pill
 
 ## Features
 
-- **Bar pill**: mic (idle) → red pulsing stop icon + elapsed (recording) → waveform + "…"
-  (transcribing). Left-click toggles recording; right-click opens the popout.
+- **Bar pill**: speaker bars (idle; three vertical bars, tall middle) → red pulsing stop icon +
+  elapsed (recording) → waveform + "…" (transcribing). Left-click toggles recording;
+  right-click opens the popout.
 - **Bottom-center overlay** (Superwhisper style): animated waveform + elapsed while recording
   (click it to stop), bouncing dots while transcribing, transcript preview flash when done.
 - **Popout** (right-click the pill): record/stop button, last 20 transcripts (click to copy,
