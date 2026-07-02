@@ -256,9 +256,17 @@ PluginComponent {
     }
 
     // Loose comparison for spoken snippet triggers: case, punctuation, and
-    // extra whitespace don't count
+    // extra whitespace don't count. Char-by-char like hasSpeechChars because
+    // QML's V4 engine silently no-ops \p{L}/\p{N} regex property escapes.
     function normalizePhrase(s) {
-        return s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+        let out = ""
+        for (const ch of s.toLowerCase()) {
+            const isLetter = ch.toLowerCase() !== ch.toUpperCase()
+            const isDigit = ch >= "0" && ch <= "9"
+            const isUncased = ch.charCodeAt(0) > 0x2E80  // CJK etc.
+            out += (isLetter || isDigit || isUncased) ? ch : " "
+        }
+        return out.replace(/\s+/g, " ").trim()
     }
 
     function matchSnippet(text) {
@@ -434,10 +442,15 @@ PluginComponent {
               + "Transcribe it and output clear, well-formatted text: fix punctuation, casing, and grammar; "
               + "remove filler words, false starts, and repeated words; when the speaker corrects themselves, "
               + "keep only the corrected version; follow explicit formatting commands like 'new paragraph', "
-              + "'new line', or 'bullet list' instead of writing them out. Preserve the meaning, tone, and "
+              + "'new line', or 'bullet list' instead of writing them out. Never insert paragraph or line "
+              + "breaks on your own: pauses and topic changes are NOT breaks, and the whole output must be "
+              + "a single line unless the speaker explicitly commands a break. Preserve the meaning, tone, and "
               + "language of the speaker. Output ONLY the final text, with no preamble, quotes, or commentary."
+        // Snippet triggers ride along so they transcribe verbatim and the
+        // whole-dictation trigger match can fire on AI transcripts too
         const words = (customWords || [])
             .map(w => typeof w === "string" ? w : (w && w.word ? w.word : ""))
+            .concat((snippets || []).map(s => s && s.trigger ? s.trigger : ""))
             .map(w => w.trim())
             .filter(w => w.length > 0)
         if (words.length > 0)
@@ -527,9 +540,10 @@ PluginComponent {
                             root.noSpeech()
                             return
                         }
-                        // Snippets are a local-dictation feature only — no
-                        // matching against AI transcriptions
-                        root.deliver(text)
+                        // Snippets fire here too, but only when the entire
+                        // dictation matches a trigger — never inside longer text
+                        const snippet = root.matchSnippet(text)
+                        root.deliver(snippet ? snippet.text.replace(/\\n/g, "\n") : text)
                         return
                     }
                 } catch (e) {}
@@ -550,9 +564,17 @@ PluginComponent {
         onTriggered: typer.running = true
     }
 
+    // Newlines are typed as Shift+Enter key events, not literal Returns:
+    // wtype types "\n" as an Enter press, which submits chat-style inputs
+    // mid-dictation. Shift+Enter inserts a line break in those instead.
     Process {
         id: typer
-        command: ["sh", "-c", "printf %s \"$1\" | wtype -", "penguin-whisperer", root.pendingText]
+        command: ["sh", "-c",
+                  'printf %s "$1" | { first=1; while IFS= read -r line || [ -n "$line" ]; do ' +
+                  '[ "$first" -eq 0 ] && wtype -M shift -k Return -m shift; ' +
+                  '[ -n "$line" ] && printf %s "$line" | wtype -; ' +
+                  'first=0; done; }',
+                  "penguin-whisperer", root.pendingText]
         onExited: exitCode => {
             if (exitCode !== 0)
                 root.fail("wtype failed (code " + exitCode + ")")

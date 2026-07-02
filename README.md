@@ -36,16 +36,20 @@ Mod+Shift+D / click mic pill
   to whisper as an initial prompt (`--prompt` + `--carry-initial-prompt`) to bias decoding
   toward the right spellings. Keep the list to a few dozen entries — the prompt is capped at
   ~224 tokens and biasing weakens as it grows.
-- **Voice snippets**: define trigger phrase → full text pairs in settings. Local (whisper)
-  dictation only: the expansion is typed when the *entire* dictation matches a trigger phrase
-  (ignoring the case/punctuation whisper adds) — triggers inside longer sentences are left
-  alone, and snippets play no part in AI mode. Triggers are fed into whisper's vocabulary
-  prompt so they transcribe reliably. `\n` in the expansion becomes a real newline.
+- **Voice snippets**: define trigger phrase → full text pairs in settings. The expansion is
+  typed when the *entire* dictation matches a trigger phrase (ignoring case and punctuation,
+  in both local and AI mode) — triggers inside longer sentences are left alone. Triggers are
+  fed into the transcriber's vocabulary prompt so they transcribe reliably. `\n` in the
+  expansion becomes a real line break.
+- **Newline-safe typing**: line breaks in typed output (AI formatting, snippet expansions)
+  are sent as Shift+Enter key events instead of literal Returns, so they insert a break in
+  chat-style inputs instead of submitting the message mid-dictation.
 - **AI transcription** (`Mod+Shift+A`): the audio recording itself is sent (base64, in-memory
   pipe) to an audio-capable model, which transcribes *and* formats in one pass — fillers/false
-  starts removed, self-corrections applied, "new paragraph"-style commands honored, newlines
-  preserved. The custom vocabulary is injected into the prompt so jargon is spelled right
-  without whisper in the loop (snippets are local-mode only). Two providers, configured in
+  starts removed, self-corrections applied, "new paragraph"-style commands honored — but the
+  model is told to never add breaks on its own (pauses aren't paragraphs), so output stays on
+  one line unless you ask. The custom vocabulary and snippet triggers are injected into the
+  prompt so jargon is spelled right without whisper in the loop. Two providers, configured in
   tabs in settings with an "active provider" selector:
   - **OpenRouter** — model dropdown fetched live from the catalog, filtered to audio-input
     models (default `google/gemini-3.5-flash`). Requests carry `X-Title: Penguin Whisperer`
