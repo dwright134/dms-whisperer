@@ -1,0 +1,15 @@
+{
+    "id": "penguinWhisperer",
+    "name": "Penguin Whisperer",
+    "description": "Push-to-talk dictation: records your voice, transcribes it locally with whisper.cpp, and types the result at the cursor",
+    "version": "0.1.0",
+    "author": "dwright",
+    "type": "widget",
+    "capabilities": ["dankbar-widget"],
+    "component": "./PenguinWhisperer.qml",
+    "icon": "mic",
+    "settings": "./PenguinWhispererSettings.qml",
+    "requires_dms": ">=1.0.0",
+    "requires": ["pw-record", "wtype", "whisper-cli"],
+    "permissions": ["settings_read", "settings_write", "process"]
+}
