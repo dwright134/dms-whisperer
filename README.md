@@ -34,13 +34,35 @@ Mod+Shift+D / click mic pill
   to whisper as an initial prompt (`--prompt` + `--carry-initial-prompt`) to bias decoding
   toward the right spellings. Keep the list to a few dozen entries — the prompt is capped at
   ~224 tokens and biasing weakens as it grows.
+- **Voice snippets**: define trigger phrase → full text pairs in settings. Local (whisper)
+  dictation only: the expansion is typed when the *entire* dictation matches a trigger phrase
+  (ignoring the case/punctuation whisper adds) — triggers inside longer sentences are left
+  alone, and snippets play no part in AI mode. Triggers are fed into whisper's vocabulary
+  prompt so they transcribe reliably. `\n` in the expansion becomes a real newline.
+- **AI transcription** (`Mod+Shift+A`): the audio recording itself is sent (base64, in-memory
+  pipe) to an audio-capable model, which transcribes *and* formats in one pass — fillers/false
+  starts removed, self-corrections applied, "new paragraph"-style commands honored, newlines
+  preserved. The custom vocabulary is injected into the prompt so jargon is spelled right
+  without whisper in the loop (snippets are local-mode only). Two providers, configured in
+  tabs in settings with an "active provider" selector:
+  - **OpenRouter** — model dropdown fetched live from the catalog, filtered to audio-input
+    models (default `google/gemini-3.5-flash`). Requests carry `X-Title: Penguin Whisperer`
+    so a shared key shows usage per app.
+  - **Google (Gemini API)** — free-tier friendly; key from aistudio.google.com/apikey, model
+    dropdown fetched from the account's catalog once a key is set (default
+    `gemini-2.5-flash`).
+
+  Pressing `Mod+Shift+A` while already recording upgrades that recording to AI mode. On any
+  API failure it falls back to local whisper so the dictation isn't lost. Keys are passed to
+  curl via the environment, never argv.
 - **Sound cues**: freedesktop chimes on start / done / error (toggleable).
 - **Silence gate**: if the recording's peak level is below -40 dB, transcription is skipped
   entirely (no whisper hallucinations typed into the focused window). Non-speech tokens are
   also suppressed (`--suppress-nst`) and bracketed annotations scrubbed; output with no real
   words is dropped.
-- **Keybind**: `Mod+Shift+D` → toggle dictation (in `~/.config/niri/dms/binds.kdl`).
-- **IPC**: `dms ipc call penguinWhisperer toggle|start|stop|status`.
+- **Keybinds**: `Mod+Shift+D` → toggle dictation, `Mod+Shift+A` → toggle AI-cleanup dictation
+  (in `~/.config/niri/dms/binds.kdl`).
+- **IPC**: `dms ipc call penguinWhisperer toggle|toggleAi|start|startAi|stop|status`.
 - Recording auto-stops after 5 minutes.
 
 ## Layout

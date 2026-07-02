@@ -18,11 +18,14 @@ PluginComponent {
     // avoiding hallucinated transcripts ("Thank you." etc.) being typed
     readonly property real silenceThresholdDb: -40
 
-    // idle | recording | stopping | transcribing | error
+    // idle | recording | stopping | transcribing | polishing | error
     property string sttState: "idle"
     property int elapsedSeconds: 0
     property string pendingText: ""
     property var history: []
+    // Whether the current recording is transcribed by an AI model (audio sent
+    // to OpenRouter) instead of local whisper
+    property bool aiSession: false
 
     // Settings (persisted via PluginService)
     property string whisperBin: home + "/.local/bin/whisper-cli"
@@ -32,21 +35,33 @@ PluginComponent {
     property bool copyText: true
     property bool soundCues: true
     property var customWords: []
+    property var snippets: []
+    property string aiProvider: "openrouter"   // "openrouter" | "google"
+    property string aiApiKey: ""               // OpenRouter key
+    property string aiModel: "google/gemini-3.5-flash"
+    property string googleApiKey: ""           // Google AI Studio (Gemini API) key
+    property string googleModel: "gemini-2.5-flash"
+    property string aiStyle: ""
+
+    readonly property string activeAiKey: aiProvider === "google" ? googleApiKey : aiApiKey
+    readonly property string activeAiModel: aiProvider === "google" ? googleModel : aiModel
 
     readonly property string modelName: modelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
 
     // Custom vocabulary is fed to whisper as an initial prompt, which biases
-    // decoding toward these spellings (same approach as Superwhisper)
+    // decoding toward these spellings (same approach as Superwhisper).
+    // Snippet triggers are included so they transcribe verbatim and match.
     readonly property string vocabPrompt: {
         const words = (customWords || [])
             .map(w => typeof w === "string" ? w : (w && w.word ? w.word : ""))
+            .concat((snippets || []).map(s => s && s.trigger ? s.trigger : ""))
             .map(w => w.trim())
             .filter(w => w.length > 0)
         return words.length > 0 ? "Glossary: " + words.join(", ") + "." : ""
     }
 
     // Overlay state
-    readonly property bool overlayActive: sttState === "recording" || sttState === "stopping" || sttState === "transcribing"
+    readonly property bool overlayActive: sttState === "recording" || sttState === "stopping" || sttState === "transcribing" || sttState === "polishing"
     readonly property bool overlayShown: overlayActive || doneLingerTimer.running
     property bool overlayWindowVisible: false
     property string doneKind: ""   // "ok" | "error"
@@ -69,6 +84,13 @@ PluginComponent {
         copyText = PluginService.loadPluginData(whispererId, "copyText", true)
         soundCues = PluginService.loadPluginData(whispererId, "soundCues", true)
         customWords = PluginService.loadPluginData(whispererId, "customWords", [])
+        snippets = PluginService.loadPluginData(whispererId, "snippets", [])
+        aiProvider = PluginService.loadPluginData(whispererId, "aiProvider", "openrouter")
+        aiApiKey = PluginService.loadPluginData(whispererId, "aiApiKey", "")
+        aiModel = PluginService.loadPluginData(whispererId, "aiModel", "google/gemini-3.5-flash")
+        googleApiKey = PluginService.loadPluginData(whispererId, "googleApiKey", "")
+        googleModel = PluginService.loadPluginData(whispererId, "googleModel", "gemini-2.5-flash")
+        aiStyle = PluginService.loadPluginData(whispererId, "aiStyle", "")
         history = PluginService.loadPluginData(whispererId, "history", [])
     }
 
@@ -98,10 +120,28 @@ PluginComponent {
         if (sttState === "recording")
             stopRecording()
         else if (sttState === "idle" || sttState === "error")
-            startRecording()
+            startRecording(false)
     }
 
-    function startRecording() {
+    // AI keybind: starts an AI-transcription session; pressed mid-recording it
+    // upgrades the session to AI mode and stops, so either bind can finish
+    function toggleAiRecording() {
+        if (sttState === "recording") {
+            aiSession = true
+            stopRecording()
+        } else if (sttState === "idle" || sttState === "error") {
+            if (activeAiKey.trim().length === 0) {
+                if (typeof ToastService !== "undefined")
+                    ToastService.showError("Penguin Whisperer: set an API key for the active AI provider in settings")
+                startRecording(false)
+            } else {
+                startRecording(true)
+            }
+        }
+    }
+
+    function startRecording(aiEdit) {
+        aiSession = aiEdit === true
         sttState = "recording"
         elapsedSeconds = 0
         recorder.running = true
@@ -166,17 +206,45 @@ PluginComponent {
         return false
     }
 
+    // Loose comparison for spoken snippet triggers: case, punctuation, and
+    // extra whitespace don't count
+    function normalizePhrase(s) {
+        return s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+    }
+
+    function matchSnippet(text) {
+        const spoken = normalizePhrase(text)
+        if (spoken.length === 0)
+            return null
+        for (const s of (snippets || [])) {
+            if (s && s.trigger && s.text && normalizePhrase(s.trigger) === spoken)
+                return s
+        }
+        return null
+    }
+
     function handleTranscript(rawText) {
         // Drop bracketed non-speech annotations ([BLANK_AUDIO], [MUSIC], ...)
         const text = rawText.replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim()
         // Parenthesized sound descriptions ((wind blowing), ...) don't count
         // as speech either, but are kept in the output if real words exist
         const speechOnly = text.replace(/\([^)]*\)/g, " ")
-        sttState = "idle"
         if (!hasSpeechChars(speechOnly)) {
+            sttState = "idle"
             noSpeech()
             return
         }
+        sttState = "idle"
+        const snippet = matchSnippet(text)
+        if (snippet) {
+            // literal "\n" in a snippet becomes a real newline when typed
+            deliver(snippet.text.replace(/\\n/g, "\n"))
+            return
+        }
+        deliver(text)
+    }
+
+    function deliver(text) {
         pushHistory(text)
         if (copyText)
             Quickshell.execDetached(["dms", "cl", "copy", text])
@@ -211,6 +279,8 @@ PluginComponent {
             return "stop_circle"
         case "transcribing":
             return "graphic_eq"
+        case "polishing":
+            return "auto_awesome"
         case "error":
             return "mic_off"
         default:
@@ -224,6 +294,7 @@ PluginComponent {
         case "stopping":
             return Theme.error
         case "transcribing":
+        case "polishing":
             return Theme.primary
         case "error":
             return Theme.warning
@@ -237,7 +308,7 @@ PluginComponent {
         command: ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", root.recordingPath]
         onExited: exitCode => {
             if (root.sttState === "stopping") {
-                root.sttState = "transcribing"
+                root.sttState = root.aiSession && root.activeAiKey.trim().length > 0 ? "polishing" : "transcribing"
                 silenceCheck.running = true
             } else if (root.sttState === "recording") {
                 root.fail("recorder exited unexpectedly (code " + exitCode + ")")
@@ -257,6 +328,8 @@ PluginComponent {
             const match = volumeOut.text.match(/max_volume:\s*(-?[\d.]+)\s*dB/)
             if (exitCode === 0 && match && parseFloat(match[1]) < root.silenceThresholdDb)
                 root.noSpeech()
+            else if (root.sttState === "polishing")
+                aiTranscriber.running = true
             else
                 transcriber.running = true  // fail open: let whisper decide
         }
@@ -288,6 +361,122 @@ PluginComponent {
                 root.handleTranscript(transcriptOut.text)
             else
                 root.fail("whisper-cli failed (code " + exitCode + "): " + transcriptErr.text.trim().split("\n").slice(-1)[0])
+        }
+    }
+
+    // AI transcription prompt: dictation rules plus the injected custom
+    // vocabulary and snippet library
+    function aiSystemPrompt() {
+        let p = "You are a dictation engine. The user message contains an audio recording of dictated speech. "
+              + "Transcribe it and output clear, well-formatted text: fix punctuation, casing, and grammar; "
+              + "remove filler words, false starts, and repeated words; when the speaker corrects themselves, "
+              + "keep only the corrected version; follow explicit formatting commands like 'new paragraph', "
+              + "'new line', or 'bullet list' instead of writing them out. Preserve the meaning, tone, and "
+              + "language of the speaker. Output ONLY the final text, with no preamble, quotes, or commentary."
+        const words = (customWords || [])
+            .map(w => typeof w === "string" ? w : (w && w.word ? w.word : ""))
+            .map(w => w.trim())
+            .filter(w => w.length > 0)
+        if (words.length > 0)
+            p += "\n\nThe speaker often uses these terms; use these exact spellings when you hear them: "
+               + words.join(", ") + "."
+        if (aiStyle.trim().length > 0)
+            p += "\n\nAdditional style instructions: " + aiStyle.trim()
+        return p
+    }
+
+    // AI transcription: the WAV itself goes to an audio-capable model, which
+    // transcribes and cleans up in one pass. The JSON payload is built here
+    // and split around a placeholder; the shell splices the base64 audio in
+    // between (base64 is JSON-safe). The key goes through the environment,
+    // not argv, so it never shows up in the process list. The URL travels as
+    // an argv parameter so the model name never touches the script text.
+    Process {
+        id: aiTranscriber
+        environment: ({ "AI_API_KEY": root.activeAiKey })
+        command: {
+            const marker = "__PW_AUDIO_B64__"
+            let payload, url, authHeader
+            if (root.aiProvider === "google") {
+                payload = JSON.stringify({
+                    system_instruction: { parts: [{ text: root.aiSystemPrompt() }] },
+                    contents: [{ parts: [
+                        { inline_data: { mime_type: "audio/wav", data: marker } }
+                    ] }]
+                })
+                url = "https://generativelanguage.googleapis.com/v1beta/models/"
+                    + root.googleModel + ":generateContent"
+                authHeader = " -H \"x-goog-api-key: $AI_API_KEY\""
+            } else {
+                payload = JSON.stringify({
+                    model: root.aiModel,
+                    messages: [
+                        { role: "system", content: root.aiSystemPrompt() },
+                        { role: "user", content: [
+                            { type: "input_audio", input_audio: { data: marker, format: "wav" } }
+                        ] }
+                    ]
+                })
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                // X-Title: OpenRouter app attribution, usage shows per app name
+                authHeader = " -H \"Authorization: Bearer $AI_API_KEY\""
+                           + " -H 'X-Title: Penguin Whisperer'"
+            }
+            const idx = payload.indexOf(marker)
+            return ["sh", "-c",
+                    "{ printf %s \"$1\"; base64 -w0 \"$3\"; printf %s \"$2\"; } | " +
+                    "curl -sS -f --max-time 120" +
+                    " -H 'Content-Type: application/json'" +
+                    authHeader +
+                    " -d @- \"$4\"",
+                    "penguin-whisperer",
+                    payload.slice(0, idx), payload.slice(idx + marker.length),
+                    root.recordingPath, url]
+        }
+        stdout: StdioCollector {
+            id: aiOut
+            waitForEnd: true
+        }
+        stderr: StdioCollector {
+            id: aiErr
+            waitForEnd: true
+        }
+        onExited: exitCode => {
+            if (exitCode === 0) {
+                try {
+                    const resp = JSON.parse(aiOut.text)
+                    let content = null
+                    if (resp && resp.choices && resp.choices[0] && resp.choices[0].message) {
+                        // OpenAI-style (OpenRouter)
+                        content = resp.choices[0].message.content
+                    } else if (resp && resp.candidates && resp.candidates[0]
+                               && resp.candidates[0].content && resp.candidates[0].content.parts) {
+                        // Gemini API
+                        content = resp.candidates[0].content.parts
+                            .map(p => typeof p.text === "string" ? p.text : "").join("")
+                    }
+                    if (typeof content === "string") {
+                        // Unlike handleTranscript, keep newlines — the model's
+                        // formatting is the point of this mode
+                        const text = content.trim()
+                        root.sttState = "idle"
+                        if (!root.hasSpeechChars(text)) {
+                            root.noSpeech()
+                            return
+                        }
+                        // Snippets are a local-dictation feature only — no
+                        // matching against AI transcriptions
+                        root.deliver(text)
+                        return
+                    }
+                } catch (e) {}
+            }
+            // Fall back to local whisper so the dictation isn't lost
+            console.warn("PenguinWhisperer: AI transcription failed:", aiErr.text.trim(), aiOut.text.slice(0, 300))
+            if (typeof ToastService !== "undefined")
+                ToastService.showError("Penguin Whisperer: AI transcription failed — falling back to whisper")
+            root.sttState = "transcribing"
+            transcriber.running = true
         }
     }
 
@@ -350,9 +539,20 @@ PluginComponent {
             return root.sttState
         }
 
+        function toggleAi(): string {
+            root.toggleAiRecording()
+            return root.sttState
+        }
+
         function start(): string {
             if (root.sttState === "idle" || root.sttState === "error")
-                root.startRecording()
+                root.startRecording(false)
+            return root.sttState
+        }
+
+        function startAi(): string {
+            if (root.sttState === "idle" || root.sttState === "error")
+                root.toggleAiRecording()
             return root.sttState
         }
 
@@ -594,13 +794,21 @@ PluginComponent {
                     font.weight: Font.Medium
                     anchors.verticalCenter: parent.verticalCenter
                 }
+
+                DankIcon {
+                    visible: root.aiSession
+                    name: "auto_awesome"
+                    size: Theme.iconSize - 8
+                    color: Theme.primary
+                    anchors.verticalCenter: parent.verticalCenter
+                }
             }
 
-            // Transcribing: bouncing dots + label
+            // Transcribing / AI cleanup: bouncing dots + label
             Row {
                 anchors.centerIn: parent
                 spacing: Theme.spacingM
-                visible: root.sttState === "transcribing"
+                visible: root.sttState === "transcribing" || root.sttState === "polishing"
 
                 Row {
                     spacing: 5
@@ -619,7 +827,7 @@ PluginComponent {
                             anchors.verticalCenter: parent.verticalCenter
 
                             SequentialAnimation on scale {
-                                running: root.sttState === "transcribing" && overlayWindow.visible
+                                running: (root.sttState === "transcribing" || root.sttState === "polishing") && overlayWindow.visible
                                 loops: Animation.Infinite
                                 PauseAnimation { duration: bounceDot.index * 160 }
                                 NumberAnimation { from: 1; to: 1.6; duration: 240; easing.type: Easing.OutQuad }
@@ -632,7 +840,9 @@ PluginComponent {
                 }
 
                 StyledText {
-                    text: "Transcribing (" + root.modelName + ")…"
+                    text: root.sttState === "polishing"
+                          ? "Transcribing with AI (" + root.activeAiModel.split("/").pop() + ")…"
+                          : "Transcribing (" + root.modelName + ")…"
                     color: Theme.surfaceText
                     font.pixelSize: Theme.fontSizeMedium
                     anchors.verticalCenter: parent.verticalCenter
@@ -675,7 +885,7 @@ PluginComponent {
         PopoutComponent {
             id: popoutRoot
             headerText: "Penguin Whisperer"
-            detailsText: "Local dictation · " + root.modelName + " · Mod+Shift+D"
+            detailsText: "Local dictation · " + root.modelName + " · Mod+Shift+D / Mod+Shift+A (AI)"
             showCloseButton: true
 
             Column {
@@ -690,6 +900,14 @@ PluginComponent {
                         iconName: root.sttState === "recording" ? "stop" : "mic"
                         backgroundColor: root.sttState === "recording" ? Theme.error : Theme.primary
                         onClicked: root.toggleRecording()
+                    }
+
+                    DankActionButton {
+                        iconName: "auto_awesome"
+                        tooltipText: root.sttState === "recording" ? "Stop & transcribe with AI" : "Record with AI transcription"
+                        buttonSize: 40
+                        anchors.verticalCenter: parent.verticalCenter
+                        onClicked: root.toggleAiRecording()
                     }
 
                     DankActionButton {
