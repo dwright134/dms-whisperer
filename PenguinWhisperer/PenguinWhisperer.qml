@@ -434,7 +434,9 @@ PluginComponent {
               + "Transcribe it and output clear, well-formatted text: fix punctuation, casing, and grammar; "
               + "remove filler words, false starts, and repeated words; when the speaker corrects themselves, "
               + "keep only the corrected version; follow explicit formatting commands like 'new paragraph', "
-              + "'new line', or 'bullet list' instead of writing them out. Preserve the meaning, tone, and "
+              + "'new line', or 'bullet list' instead of writing them out. Never insert paragraph or line "
+              + "breaks on your own: pauses and topic changes are NOT breaks, and the whole output must be "
+              + "a single line unless the speaker explicitly commands a break. Preserve the meaning, tone, and "
               + "language of the speaker. Output ONLY the final text, with no preamble, quotes, or commentary."
         const words = (customWords || [])
             .map(w => typeof w === "string" ? w : (w && w.word ? w.word : ""))
@@ -550,9 +552,17 @@ PluginComponent {
         onTriggered: typer.running = true
     }
 
+    // Newlines are typed as Shift+Enter key events, not literal Returns:
+    // wtype types "\n" as an Enter press, which submits chat-style inputs
+    // mid-dictation. Shift+Enter inserts a line break in those instead.
     Process {
         id: typer
-        command: ["sh", "-c", "printf %s \"$1\" | wtype -", "penguin-whisperer", root.pendingText]
+        command: ["sh", "-c",
+                  'printf %s "$1" | { first=1; while IFS= read -r line || [ -n "$line" ]; do ' +
+                  '[ "$first" -eq 0 ] && wtype -M shift -k Return -m shift; ' +
+                  '[ -n "$line" ] && printf %s "$line" | wtype -; ' +
+                  'first=0; done; }',
+                  "penguin-whisperer", root.pendingText]
         onExited: exitCode => {
             if (exitCode !== 0)
                 root.fail("wtype failed (code " + exitCode + ")")
