@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import qs.Common
 import qs.Services
 import qs.Widgets
@@ -20,6 +21,54 @@ PluginSettings {
         { name: "small", desc: "Multilingual — pair with Auto-detect", mb: 466, bytes: 487601967 },
         { name: "medium.en", desc: "Most accurate, slow on this CPU", mb: 1500, bytes: 1528008539 }
     ]
+
+    // Audio-capable OpenRouter models for the AI-transcription dropdown,
+    // fetched live from the catalog; static fallback if the fetch fails
+    readonly property var aiModelFallback: [
+        { label: "Google: Gemini 3.5 Flash", value: "google/gemini-3.5-flash" },
+        { label: "Google: Gemini 2.5 Flash", value: "google/gemini-2.5-flash" },
+        { label: "Google: Gemini 2.5 Pro", value: "google/gemini-2.5-pro" },
+        { label: "OpenAI: GPT Audio", value: "openai/gpt-audio" },
+        { label: "OpenAI: GPT Audio Mini", value: "openai/gpt-audio-mini" },
+        { label: "Mistral: Voxtral Small 24B", value: "mistralai/voxtral-small-24b-2507" }
+    ]
+    property var aiModelOptions: aiModelFallback
+    property bool aiModelsLive: false
+
+    // Gemini API models (Google tab); the list endpoint needs the API key,
+    // so this only goes live once one is configured
+    readonly property var googleModelFallback: [
+        { label: "gemini-2.5-flash", value: "gemini-2.5-flash" },
+        { label: "gemini-2.5-flash-lite", value: "gemini-2.5-flash-lite" },
+        { label: "gemini-2.5-pro", value: "gemini-2.5-pro" }
+    ]
+    property var googleModelOptions: googleModelFallback
+    property bool googleModelsLive: false
+
+    function fetchAiModels() {
+        Proc.runCommand("penguinWhisperer.aiModels",
+                        ["curl", "-sS", "--max-time", "20", "https://openrouter.ai/api/v1/models"],
+                        (out, code) => {
+                            if (code !== 0)
+                                return
+                            try {
+                                const models = (JSON.parse(out).data || [])
+                                    .filter(m => m && m.id && !m.id.startsWith("~")
+                                                 && m.architecture
+                                                 && (m.architecture.input_modalities || []).indexOf("audio") !== -1
+                                                 && (m.architecture.output_modalities || ["text"]).indexOf("text") !== -1)
+                                    .map(m => ({ label: m.name || m.id, value: m.id }))
+                                    .sort((a, b) => a.label.localeCompare(b.label))
+                                if (models.length > 0) {
+                                    aiModelOptions = models
+                                    aiModelsLive = true
+                                }
+                            } catch (e) {
+                                console.warn("PenguinWhisperer: failed to parse OpenRouter model list:", e)
+                            }
+                        },
+                        50, 25000)
+    }
 
     property var installedFiles: []
     // name → percent; -1 means "just started" (grace period before the
@@ -140,7 +189,64 @@ PluginSettings {
         activeModelPath = modelFullPath(model.name)
     }
 
-    Component.onCompleted: refresh()
+    // Filters out non-conversational Gemini variants (TTS, embeddings, image
+    // generation, live/native-audio, etc.) that can't do audio->text dictation
+    readonly property var googleModelExclude: /(tts|embedding|live|native-audio|image|imagen|veo|aqa|learnlm|robotics|gemma)/
+
+    property string googleFetchKey: ""
+
+    Process {
+        id: googleModelFetch
+        environment: ({ "AI_API_KEY": settingsRoot.googleFetchKey })
+        command: ["sh", "-c",
+                  "curl -sS --max-time 20 -H \"x-goog-api-key: $AI_API_KEY\" " +
+                  "'https://generativelanguage.googleapis.com/v1beta/models?pageSize=200'"]
+        stdout: StdioCollector {
+            id: googleModelsOut
+            waitForEnd: true
+        }
+        onExited: exitCode => {
+            if (exitCode !== 0)
+                return
+            try {
+                const models = (JSON.parse(googleModelsOut.text).models || [])
+                    .filter(m => m && m.name && m.name.startsWith("models/gemini")
+                                 && (m.supportedGenerationMethods || []).indexOf("generateContent") !== -1
+                                 && !settingsRoot.googleModelExclude.test(m.name))
+                    .map(m => ({ label: m.name.replace("models/", ""), value: m.name.replace("models/", "") }))
+                    .sort((a, b) => a.label.localeCompare(b.label))
+                if (models.length > 0) {
+                    settingsRoot.googleModelOptions = models
+                    settingsRoot.googleModelsLive = true
+                }
+            } catch (e) {
+                console.warn("PenguinWhisperer: failed to parse Gemini model list:", e)
+            }
+        }
+    }
+
+    function fetchGoogleModels() {
+        const key = PluginService.loadPluginData(pluginId, "googleApiKey", "").trim()
+        if (key.length > 0 && !googleModelFetch.running) {
+            googleFetchKey = key
+            googleModelFetch.running = true
+        }
+    }
+
+    // Pick up a freshly pasted Google key without reopening the page
+    Connections {
+        target: PluginService
+        function onPluginDataChanged(pluginId) {
+            if (pluginId === settingsRoot.pluginId && !settingsRoot.googleModelsLive)
+                settingsRoot.fetchGoogleModels()
+        }
+    }
+
+    Component.onCompleted: {
+        refresh()
+        fetchAiModels()
+        fetchGoogleModels()
+    }
 
     Timer {
         id: progressTimer
@@ -197,7 +303,7 @@ PluginSettings {
 
     StyledText {
         width: parent.width
-        text: "Click the mic in the bar, press Mod+Shift+D, or run `dms ipc call penguinWhisperer toggle` to dictate. Text is typed at the focused cursor when transcription finishes."
+        text: "Click the mic in the bar, press Mod+Shift+D, or run `dms ipc call penguinWhisperer toggle` to dictate. Text is typed at the focused cursor when transcription finishes. Mod+Shift+A dictates via an AI provider instead (configured below)."
         font.pixelSize: Theme.fontSizeMedium
         color: Theme.surfaceVariantText
         wrapMode: Text.WordWrap
@@ -344,6 +450,128 @@ PluginSettings {
                 }
             }
         }
+    }
+
+    // ── Snippets ───────────────────────────────────────────────────────────
+
+    StyledText {
+        width: parent.width
+        text: "Snippets"
+        font.pixelSize: Theme.fontSizeLarge
+        font.weight: Font.Bold
+        color: Theme.surfaceText
+    }
+
+    ListSettingWithInput {
+        settingKey: "snippets"
+        label: "Voice snippets"
+        description: "Speak a trigger phrase on its own and the full text is typed instead of the transcript. Only applies to local (whisper) dictation; the whole dictation must match the trigger, ignoring case and punctuation. Use \\n in the text for a line break."
+        defaultValue: []
+        fields: [
+            {id: "trigger", label: "Trigger phrase", placeholder: "sign off", width: 160, required: true},
+            {id: "text", label: "Text to type", placeholder: "Best regards,\\nDaniel", width: 300, required: true}
+        ]
+    }
+
+    // ── AI cleanup ─────────────────────────────────────────────────────────
+
+    StyledText {
+        width: parent.width
+        text: "AI cleanup"
+        font.pixelSize: Theme.fontSizeLarge
+        font.weight: Font.Bold
+        color: Theme.surfaceText
+    }
+
+    StyledText {
+        width: parent.width
+        text: "Dictate with Mod+Shift+A (or `dms ipc call penguinWhisperer toggleAi`) and the audio recording is sent straight to an audio-capable model, which transcribes and formats it in one pass — rambling in, clear formatted text out. Your custom vocabulary is included in the prompt; snippets don't apply in this mode. Pressing Mod+Shift+A while already recording also finishes with AI transcription. On failure it falls back to local whisper. Configure each provider in its tab, then pick which one is active below."
+        font.pixelSize: Theme.fontSizeSmall
+        color: Theme.surfaceVariantText
+        wrapMode: Text.WordWrap
+    }
+
+    DankTabBar {
+        id: providerTabs
+        width: Math.min(320, parent.width)
+        height: 45
+        model: [
+            { text: "OpenRouter", icon: "hub" },
+            { text: "Google", icon: "cloud" }
+        ]
+        Component.onCompleted: {
+            currentIndex = PluginService.loadPluginData(settingsRoot.pluginId, "aiProvider", "openrouter") === "google" ? 1 : 0
+        }
+        onTabClicked: index => currentIndex = index
+    }
+
+    // OpenRouter provider tab
+    Column {
+        width: parent.width
+        spacing: Theme.spacingM
+        visible: providerTabs.currentIndex === 0
+
+        StringSetting {
+            settingKey: "aiApiKey"
+            label: "OpenRouter API key"
+            description: "Create one at openrouter.ai/keys. Stored in plugin settings; sent only to openrouter.ai."
+            placeholder: "sk-or-v1-…"
+            defaultValue: ""
+        }
+
+        SelectionSetting {
+            settingKey: "aiModel"
+            label: "Model"
+            description: settingsRoot.aiModelsLive
+                         ? "Audio-capable models from the OpenRouter catalog"
+                         : "Known audio-capable models (couldn't fetch the live OpenRouter catalog)"
+            options: settingsRoot.aiModelOptions
+            defaultValue: "google/gemini-3.5-flash"
+        }
+    }
+
+    // Google (Gemini API) provider tab
+    Column {
+        width: parent.width
+        spacing: Theme.spacingM
+        visible: providerTabs.currentIndex === 1
+
+        StringSetting {
+            settingKey: "googleApiKey"
+            label: "Google AI Studio API key"
+            description: "Free tier available — create one at aistudio.google.com/apikey. Stored in plugin settings; sent only to generativelanguage.googleapis.com."
+            placeholder: "AIza…"
+            defaultValue: ""
+        }
+
+        SelectionSetting {
+            settingKey: "googleModel"
+            label: "Model"
+            description: settingsRoot.googleModelsLive
+                         ? "Gemini models from your account's catalog"
+                         : "Common Gemini models (the live catalog loads once an API key is set)"
+            options: settingsRoot.googleModelOptions
+            defaultValue: "gemini-2.5-flash"
+        }
+    }
+
+    SelectionSetting {
+        settingKey: "aiProvider"
+        label: "Active provider"
+        description: "Which provider Mod+Shift+A uses"
+        options: [
+            { label: "OpenRouter", value: "openrouter" },
+            { label: "Google (Gemini API)", value: "google" }
+        ]
+        defaultValue: "openrouter"
+    }
+
+    StringSetting {
+        settingKey: "aiStyle"
+        label: "Extra style instructions (optional)"
+        description: "Appended to the cleanup prompt, e.g. \"British spelling\" or \"keep it casual, no em dashes\""
+        placeholder: ""
+        defaultValue: ""
     }
 
     // ── Behaviour ──────────────────────────────────────────────────────────
