@@ -14,6 +14,9 @@ PluginComponent {
     readonly property string home: Quickshell.env("HOME")
     readonly property string recordingPath: "/tmp/penguin-whisperer-recording.wav"
     readonly property int maxRecordSeconds: 300
+    // Peak level below this is treated as silence and never sent to whisper,
+    // avoiding hallucinated transcripts ("Thank you." etc.) being typed
+    readonly property real silenceThresholdDb: -40
 
     // idle | recording | stopping | transcribing | error
     property string sttState: "idle"
@@ -28,8 +31,19 @@ PluginComponent {
     property bool typeText: true
     property bool copyText: true
     property bool soundCues: true
+    property var customWords: []
 
     readonly property string modelName: modelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
+
+    // Custom vocabulary is fed to whisper as an initial prompt, which biases
+    // decoding toward these spellings (same approach as Superwhisper)
+    readonly property string vocabPrompt: {
+        const words = (customWords || [])
+            .map(w => typeof w === "string" ? w : (w && w.word ? w.word : ""))
+            .map(w => w.trim())
+            .filter(w => w.length > 0)
+        return words.length > 0 ? "Glossary: " + words.join(", ") + "." : ""
+    }
 
     // Overlay state
     readonly property bool overlayActive: sttState === "recording" || sttState === "stopping" || sttState === "transcribing"
@@ -54,6 +68,7 @@ PluginComponent {
         typeText = PluginService.loadPluginData(whispererId, "typeText", true)
         copyText = PluginService.loadPluginData(whispererId, "copyText", true)
         soundCues = PluginService.loadPluginData(whispererId, "soundCues", true)
+        customWords = PluginService.loadPluginData(whispererId, "customWords", [])
         history = PluginService.loadPluginData(whispererId, "history", [])
     }
 
@@ -129,15 +144,37 @@ PluginComponent {
         PluginService.savePluginData(whispererId, "history", [])
     }
 
-    function handleTranscript(rawText) {
-        const text = rawText.trim().replace(/\[BLANK_AUDIO\]/g, "").trim()
+    function noSpeech() {
         sttState = "idle"
-        if (text.length === 0) {
-            doneKind = "error"
-            doneText = "No speech detected"
-            doneLingerTimer.restart()
-            if (typeof ToastService !== "undefined")
-                ToastService.showInfo("Penguin Whisperer: no speech detected")
+        doneKind = "error"
+        doneText = "No speech detected"
+        doneLingerTimer.restart()
+        if (typeof ToastService !== "undefined")
+            ToastService.showInfo("Penguin Whisperer: no speech detected")
+    }
+
+    // True if the string contains at least one letter (any script) or digit
+    function hasSpeechChars(s) {
+        for (const ch of s) {
+            if (ch.toLowerCase() !== ch.toUpperCase())
+                return true
+            if (ch >= "0" && ch <= "9")
+                return true
+            if (ch.charCodeAt(0) > 0x2E80)  // CJK and other uncased scripts
+                return true
+        }
+        return false
+    }
+
+    function handleTranscript(rawText) {
+        // Drop bracketed non-speech annotations ([BLANK_AUDIO], [MUSIC], ...)
+        const text = rawText.replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim()
+        // Parenthesized sound descriptions ((wind blowing), ...) don't count
+        // as speech either, but are kept in the output if real words exist
+        const speechOnly = text.replace(/\([^)]*\)/g, " ")
+        sttState = "idle"
+        if (!hasSpeechChars(speechOnly)) {
+            noSpeech()
             return
         }
         pushHistory(text)
@@ -201,21 +238,43 @@ PluginComponent {
         onExited: exitCode => {
             if (root.sttState === "stopping") {
                 root.sttState = "transcribing"
-                transcriber.running = true
+                silenceCheck.running = true
             } else if (root.sttState === "recording") {
                 root.fail("recorder exited unexpectedly (code " + exitCode + ")")
             }
         }
     }
 
+    // Peak-level gate: silence skips transcription entirely
+    Process {
+        id: silenceCheck
+        command: ["ffmpeg", "-hide_banner", "-i", root.recordingPath, "-af", "volumedetect", "-f", "null", "-"]
+        stderr: StdioCollector {
+            id: volumeOut
+            waitForEnd: true
+        }
+        onExited: exitCode => {
+            const match = volumeOut.text.match(/max_volume:\s*(-?[\d.]+)\s*dB/)
+            if (exitCode === 0 && match && parseFloat(match[1]) < root.silenceThresholdDb)
+                root.noSpeech()
+            else
+                transcriber.running = true  // fail open: let whisper decide
+        }
+    }
+
     Process {
         id: transcriber
-        command: [root.whisperBin,
-                  "-m", root.modelPath,
-                  "-f", root.recordingPath,
-                  "-l", root.language,
-                  "-t", "4",
-                  "--no-timestamps", "--no-prints"]
+        command: {
+            const cmd = [root.whisperBin,
+                         "-m", root.modelPath,
+                         "-f", root.recordingPath,
+                         "-l", root.language,
+                         "-t", "4",
+                         "--no-timestamps", "--no-prints", "--suppress-nst"]
+            if (root.vocabPrompt.length > 0)
+                cmd.push("--prompt", root.vocabPrompt, "--carry-initial-prompt")
+            return cmd
+        }
         stdout: StdioCollector {
             id: transcriptOut
             waitForEnd: true
