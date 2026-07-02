@@ -45,6 +45,83 @@ PluginSettings {
     property var googleModelOptions: googleModelFallback
     property bool googleModelsLive: false
 
+    // Same display name can appear for several catalog entries (e.g. preview
+    // revisions); append the model id so every row is tellable apart
+    function disambiguate(models) {
+        const counts = {}
+        for (const m of models)
+            counts[m.label] = (counts[m.label] || 0) + 1
+        return models.map(m => counts[m.label] > 1
+                          ? { label: m.label + " · " + m.value, value: m.value }
+                          : m)
+    }
+
+    // Model pickers need more room than SelectionSetting's fixed 200px
+    // control, which elides long model names into ambiguity: full-width
+    // dropdown, wide popup, fuzzy search over the whole catalog
+    component ModelSelect: Column {
+        id: modelSelect
+
+        required property string settingKey
+        required property string label
+        property string description: ""
+        property var options: []
+        property string defaultValue: ""
+        property string value: defaultValue
+
+        readonly property var valueToLabel: {
+            const map = {}
+            for (const opt of options)
+                map[opt.value] = opt.label
+            return map
+        }
+        readonly property var labelToValue: {
+            const map = {}
+            for (const opt of options)
+                map[opt.label] = opt.value
+            return map
+        }
+
+        width: parent.width
+        spacing: Theme.spacingS
+
+        // Called by PluginSettings when the plugin service appears
+        function loadValue() {
+            if (settingsRoot.pluginService)
+                value = settingsRoot.loadValue(settingKey, defaultValue)
+        }
+
+        Component.onCompleted: loadValue()
+
+        StyledText {
+            text: modelSelect.label
+            font.pixelSize: Theme.fontSizeMedium
+            font.weight: Font.Medium
+            color: Theme.surfaceText
+        }
+
+        StyledText {
+            text: modelSelect.description
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.surfaceVariantText
+            width: parent.width
+            wrapMode: Text.WordWrap
+            visible: modelSelect.description !== ""
+        }
+
+        DankDropdown {
+            width: parent.width
+            enableFuzzySearch: true
+            maxPopupHeight: 440
+            currentValue: modelSelect.valueToLabel[modelSelect.value] || modelSelect.value
+            options: modelSelect.options.map(o => o.label)
+            onValueChanged: newValue => {
+                modelSelect.value = modelSelect.labelToValue[newValue] || newValue
+                settingsRoot.saveValue(modelSelect.settingKey, modelSelect.value)
+            }
+        }
+    }
+
     function fetchAiModels() {
         Proc.runCommand("penguinWhisperer.aiModels",
                         ["curl", "-sS", "--max-time", "20", "https://openrouter.ai/api/v1/models"],
@@ -60,7 +137,7 @@ PluginSettings {
                                     .map(m => ({ label: m.name || m.id, value: m.id }))
                                     .sort((a, b) => a.label.localeCompare(b.label))
                                 if (models.length > 0) {
-                                    aiModelOptions = models
+                                    aiModelOptions = disambiguate(models)
                                     aiModelsLive = true
                                 }
                             } catch (e) {
@@ -216,7 +293,7 @@ PluginSettings {
                     .map(m => ({ label: m.name.replace("models/", ""), value: m.name.replace("models/", "") }))
                     .sort((a, b) => a.label.localeCompare(b.label))
                 if (models.length > 0) {
-                    settingsRoot.googleModelOptions = models
+                    settingsRoot.googleModelOptions = settingsRoot.disambiguate(models)
                     settingsRoot.googleModelsLive = true
                 }
             } catch (e) {
@@ -519,11 +596,11 @@ PluginSettings {
             defaultValue: ""
         }
 
-        SelectionSetting {
+        ModelSelect {
             settingKey: "aiModel"
             label: "Model"
             description: settingsRoot.aiModelsLive
-                         ? "Audio-capable models from the OpenRouter catalog"
+                         ? "Audio-capable models from the OpenRouter catalog — click to search"
                          : "Known audio-capable models (couldn't fetch the live OpenRouter catalog)"
             options: settingsRoot.aiModelOptions
             defaultValue: "google/gemini-3.5-flash"
@@ -544,11 +621,11 @@ PluginSettings {
             defaultValue: ""
         }
 
-        SelectionSetting {
+        ModelSelect {
             settingKey: "googleModel"
             label: "Model"
             description: settingsRoot.googleModelsLive
-                         ? "Gemini models from your account's catalog"
+                         ? "Gemini models from your account's catalog — click to search"
                          : "Common Gemini models (the live catalog loads once an API key is set)"
             options: settingsRoot.googleModelOptions
             defaultValue: "gemini-2.5-flash"
@@ -572,6 +649,44 @@ PluginSettings {
         description: "Appended to the cleanup prompt, e.g. \"British spelling\" or \"keep it casual, no em dashes\""
         placeholder: ""
         defaultValue: ""
+    }
+
+    // ── Recording ──────────────────────────────────────────────────────────
+
+    StyledText {
+        width: parent.width
+        text: "Recording"
+        font.pixelSize: Theme.fontSizeLarge
+        font.weight: Font.Bold
+        color: Theme.surfaceText
+    }
+
+    ToggleSetting {
+        settingKey: "autoStopEnabled"
+        label: "Auto-stop on silence"
+        description: "Stop dictation automatically after a stretch of silence. Only arms once you've actually said something, so it won't cut off a slow start. When off, recording keeps going until you click the bar pill or hit the keybind again (5 minute cap either way)."
+        defaultValue: false
+    }
+
+    SliderSetting {
+        settingKey: "autoStopSeconds"
+        label: "Silence before auto-stop"
+        description: "How long a pause has to last before dictation stops — raise it if you like to think mid-sentence"
+        minimum: 1
+        maximum: 15
+        defaultValue: 3
+        unit: "s"
+    }
+
+    SelectionSetting {
+        settingKey: "overlayPosition"
+        label: "Overlay position"
+        description: "Screen edge where the recording overlay pops up"
+        options: [
+            { label: "Bottom", value: "bottom" },
+            { label: "Top", value: "top" }
+        ]
+        defaultValue: "bottom"
     }
 
     // ── Behaviour ──────────────────────────────────────────────────────────

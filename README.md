@@ -22,14 +22,16 @@ Mod+Shift+D / click mic pill
 - **Bar pill**: speaker bars (idle; three vertical bars, tall middle) → red pulsing stop icon +
   elapsed (recording) → waveform + "…" (transcribing). Left-click toggles recording;
   right-click opens the popout.
-- **Bottom-center overlay** (Superwhisper style): animated waveform + elapsed while recording
-  (click it to stop), bouncing dots while transcribing, transcript preview flash when done.
+- **Recording overlay** (Superwhisper style, bottom- or top-center — selectable in settings):
+  live waveform driven by actual mic levels (bars scroll and only move when you speak) +
+  elapsed while recording (click it to stop), bouncing dots while transcribing, transcript
+  preview flash when done.
 - **Popout** (right-click the pill): record/stop button, last 20 transcripts (click to copy,
   keyboard icon to re-type at cursor), clear history, open settings.
 - **Settings → Plugins → Penguin Whisperer**: model manager (download/delete/select tiny.en,
   base.en, small.en, small multilingual, medium.en straight from Hugging Face with progress),
-  custom vocabulary, language (en/auto), type-at-cursor / clipboard / sound-cue toggles,
-  whisper-cli path.
+  custom vocabulary, language (en/auto), auto-stop on silence + overlay position,
+  type-at-cursor / clipboard / sound-cue toggles, whisper-cli path.
 - **Custom vocabulary**: add names, jargon, and tricky spellings in settings; they're passed
   to whisper as an initial prompt (`--prompt` + `--carry-initial-prompt`) to bias decoding
   toward the right spellings. Keep the list to a few dozen entries — the prompt is capped at
@@ -63,7 +65,11 @@ Mod+Shift+D / click mic pill
 - **Keybinds**: `Mod+Shift+D` → toggle dictation, `Mod+Shift+A` → toggle AI-cleanup dictation
   (in `~/.config/niri/dms/binds.kdl`).
 - **IPC**: `dms ipc call penguinWhisperer toggle|toggleAi|start|startAi|stop|status`.
-- Recording auto-stops after 5 minutes.
+- **Auto-stop on silence** (off by default): when enabled, dictation stops on its own after a
+  configurable 1–15 s of silence. It only arms once you've actually said something, and voice
+  detection is relative to an adaptive noise floor, so mic volume and room noise don't need
+  tuning. When off, recording keeps going through thinking pauses until you click the pill or
+  hit the keybind again. Either way there's a 5-minute cap.
 
 ## Layout
 

@@ -42,6 +42,23 @@ PluginComponent {
     property string googleApiKey: ""           // Google AI Studio (Gemini API) key
     property string googleModel: "gemini-2.5-flash"
     property string aiStyle: ""
+    property string overlayPosition: "bottom"  // "bottom" | "top"
+    property bool autoStopEnabled: false
+    property int autoStopSeconds: 3
+
+    readonly property bool overlayAtTop: overlayPosition === "top"
+
+    // Live mic level while recording: rolling buffer of 0..1 peaks (one per
+    // ~100ms), newest last, drives the overlay waveform and silence auto-stop
+    readonly property int waveBarCount: 22
+    property var levelHistory: []
+    property bool voiceHeard: false
+    property real lastVoiceAt: 0
+    property int levelWarmup: 0
+    // Adaptive noise floor (s16 peak units): captured levels depend on the
+    // source's volume, so voice is "well above the recent quiet level"
+    // rather than an absolute threshold
+    property real noiseFloor: 500
 
     readonly property string activeAiKey: aiProvider === "google" ? googleApiKey : aiApiKey
     readonly property string activeAiModel: aiProvider === "google" ? googleModel : aiModel
@@ -91,6 +108,9 @@ PluginComponent {
         googleApiKey = PluginService.loadPluginData(whispererId, "googleApiKey", "")
         googleModel = PluginService.loadPluginData(whispererId, "googleModel", "gemini-2.5-flash")
         aiStyle = PluginService.loadPluginData(whispererId, "aiStyle", "")
+        overlayPosition = PluginService.loadPluginData(whispererId, "overlayPosition", "bottom")
+        autoStopEnabled = PluginService.loadPluginData(whispererId, "autoStopEnabled", false)
+        autoStopSeconds = PluginService.loadPluginData(whispererId, "autoStopSeconds", 3)
         history = PluginService.loadPluginData(whispererId, "history", [])
     }
 
@@ -144,8 +164,37 @@ PluginComponent {
         aiSession = aiEdit === true
         sttState = "recording"
         elapsedSeconds = 0
+        levelHistory = new Array(waveBarCount).fill(0)
+        levelWarmup = 0
+        voiceHeard = false
+        noiseFloor = 500
+        lastVoiceAt = Date.now()
         recorder.running = true
         playCue("start")
+    }
+
+    function handleLevel(peak) {
+        // The first few chunks can carry the stream-start pop; skip them so
+        // they neither jolt the waveform nor arm the auto-stop countdown
+        if (levelWarmup < 3) {
+            levelWarmup++
+            return
+        }
+        // Bar height follows dB so it looks lively at any capture volume:
+        // -50 dBFS (quiet) .. -10 dBFS (loud speech) maps to 0..1
+        const db = 20 * Math.log10(Math.max(peak, 1) / 32768)
+        levelHistory = levelHistory.slice(1).concat([Math.max(0, Math.min(1, (db + 50) / 40))])
+        if (sttState !== "recording")
+            return
+        // Floor drops instantly on quieter samples, creeps up otherwise
+        noiseFloor = peak < noiseFloor ? peak : Math.min(peak, noiseFloor * 1.02 + 2)
+        if (peak > Math.max(250, noiseFloor * 3)) {
+            voiceHeard = true
+            lastVoiceAt = Date.now()
+        } else if (autoStopEnabled && voiceHeard
+                   && Date.now() - lastVoiceAt >= autoStopSeconds * 1000) {
+            stopRecording()
+        }
     }
 
     function stopRecording() {
@@ -313,6 +362,20 @@ PluginComponent {
             } else if (root.sttState === "recording") {
                 root.fail("recorder exited unexpectedly (code " + exitCode + ")")
             }
+        }
+    }
+
+    // Live level meter: a second capture stream feeds a pipeline that prints
+    // one peak sample value per 100ms (800 samples at 8kHz). Killing the sh
+    // wrapper orphans the pipeline briefly; it self-destructs via SIGPIPE.
+    Process {
+        id: levelMonitor
+        running: root.sttState === "recording"
+        command: ["sh", "-c",
+                  "pw-record --rate 8000 --channels 1 --format s16 - | od -An -v -td2 -w2 | " +
+                  "awk '{v=$1<0?-$1:$1; if(v>p)p=v; if(++n>=800){print p; p=0; n=0; fflush()}}'"]
+        stdout: SplitParser {
+            onRead: data => root.handleLevel(parseInt(data.trim(), 10) || 0)
         }
     }
 
@@ -685,16 +748,21 @@ PluginComponent {
         WlrLayershell.namespace: "quickshell:penguinWhispererOverlay"
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
-        anchors.bottom: true
-        margins.bottom: 48
+        anchors.bottom: !root.overlayAtTop
+        anchors.top: root.overlayAtTop
+        margins.bottom: root.overlayAtTop ? 0 : 48
+        margins.top: root.overlayAtTop ? 48 : 0
         implicitWidth: 360
         implicitHeight: 100
 
         Rectangle {
             id: overlayCard
             anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottom: parent.bottom
+            anchors.bottom: root.overlayAtTop ? undefined : parent.bottom
+            anchors.top: root.overlayAtTop ? parent.top : undefined
+            // Slides toward the nearest screen edge while fading out
             anchors.bottomMargin: root.overlayShown ? 12 : -8
+            anchors.topMargin: root.overlayShown ? 12 : -8
             width: 340
             height: 72
             radius: height / 2
@@ -707,6 +775,9 @@ PluginComponent {
                 NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
             }
             Behavior on anchors.bottomMargin {
+                NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+            }
+            Behavior on anchors.topMargin {
                 NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
             }
 
@@ -742,46 +813,25 @@ PluginComponent {
                     }
                 }
 
+                // Scrolling waveform of real mic levels, newest on the right
                 Row {
                     id: waveform
                     spacing: 3
                     anchors.verticalCenter: parent.verticalCenter
 
                     Repeater {
-                        id: waveRepeater
-                        model: 22
+                        model: root.waveBarCount
 
                         Rectangle {
+                            required property int index
                             width: 4
-                            height: 6
+                            height: 5 + 31 * (root.levelHistory[index] || 0)
                             radius: 2
                             color: Theme.error
                             anchors.verticalCenter: parent.verticalCenter
 
                             Behavior on height {
                                 NumberAnimation { duration: 110; easing.type: Easing.OutQuad }
-                            }
-                        }
-                    }
-
-                    Timer {
-                        interval: 110
-                        repeat: true
-                        running: root.sttState === "recording" && overlayWindow.visible
-                        onTriggered: {
-                            for (let i = 0; i < waveRepeater.count; i++) {
-                                const bar = waveRepeater.itemAt(i)
-                                if (bar)
-                                    bar.height = 5 + Math.random() * 31
-                            }
-                        }
-                        onRunningChanged: {
-                            if (!running) {
-                                for (let i = 0; i < waveRepeater.count; i++) {
-                                    const bar = waveRepeater.itemAt(i)
-                                    if (bar)
-                                        bar.height = 6
-                                }
                             }
                         }
                     }
