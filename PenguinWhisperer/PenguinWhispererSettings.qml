@@ -56,6 +56,89 @@ PluginSettings {
                           : m)
     }
 
+    // Secret string setting: a saved value is masked with bullets and is
+    // never readable from the settings page (no reveal toggle). Mirrors
+    // StringSetting's self-loading pattern so it works nested inside tab
+    // columns without relying on PluginSettings' direct-child load walk.
+    component SecretSetting: Column {
+        id: secret
+
+        required property string settingKey
+        required property string label
+        property string description: ""
+        property string placeholder: ""
+        property string defaultValue: ""
+        property string value: defaultValue
+
+        width: parent.width
+        spacing: Theme.spacingS
+
+        property bool isInitialized: false
+
+        function findSettings() {
+            let item = parent
+            while (item) {
+                if (item.saveValue !== undefined && item.loadValue !== undefined)
+                    return item
+                item = item.parent
+            }
+            return null
+        }
+
+        function loadValue() {
+            const settings = findSettings()
+            if (settings) {
+                const loaded = settings.loadValue(settingKey, defaultValue)
+                if (textField.activeFocus && isInitialized)
+                    return
+                value = loaded
+                // Load the real key masked, so the bullet count reflects the
+                // stored value and the field reads as "set" at a glance.
+                textField.text = loaded
+                isInitialized = true
+            }
+        }
+
+        function commit() {
+            if (!isInitialized)
+                return
+            if (textField.text === value)
+                return
+            value = textField.text
+            const settings = findSettings()
+            if (settings)
+                settings.saveValue(settingKey, value)
+        }
+
+        Component.onCompleted: Qt.callLater(loadValue)
+
+        StyledText {
+            text: secret.label
+            font.pixelSize: Theme.fontSizeMedium
+            font.weight: Font.Medium
+            color: Theme.surfaceText
+        }
+
+        StyledText {
+            text: secret.description
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.surfaceVariantText
+            width: parent.width
+            wrapMode: Text.WordWrap
+            visible: secret.description !== ""
+        }
+
+        DankTextField {
+            id: textField
+            width: parent.width
+            placeholderText: secret.placeholder
+            echoMode: TextInput.Password
+            showPasswordToggle: false
+            onEditingFinished: secret.commit()
+            onActiveFocusChanged: if (!activeFocus) secret.commit()
+        }
+    }
+
     // Model pickers need more room than SelectionSetting's fixed 200px
     // control, which elides long model names into ambiguity: full-width
     // dropdown, wide popup, fuzzy search over the whole catalog
@@ -588,7 +671,7 @@ PluginSettings {
         spacing: Theme.spacingM
         visible: providerTabs.currentIndex === 0
 
-        StringSetting {
+        SecretSetting {
             settingKey: "aiApiKey"
             label: "OpenRouter API key"
             description: "Create one at openrouter.ai/keys. Stored in plugin settings; sent only to openrouter.ai."
@@ -613,7 +696,7 @@ PluginSettings {
         spacing: Theme.spacingM
         visible: providerTabs.currentIndex === 1
 
-        StringSetting {
+        SecretSetting {
             settingKey: "googleApiKey"
             label: "Google AI Studio API key"
             description: "Free tier available — create one at aistudio.google.com/apikey. Stored in plugin settings; sent only to generativelanguage.googleapis.com."
