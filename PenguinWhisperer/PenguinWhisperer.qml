@@ -356,7 +356,24 @@ PluginComponent {
         case "error":
             return Theme.warning
         default:
-            return Theme.surfaceText
+            return Theme.widgetIconColor
+        }
+    }
+
+    function stateLabel() {
+        switch (sttState) {
+        case "recording":
+            return "Recording · " + formatElapsed() + (aiSession ? " · AI" : "")
+        case "stopping":
+            return "Stopping…"
+        case "transcribing":
+            return "Transcribing (" + modelName + ")…"
+        case "polishing":
+            return "Transcribing with AI (" + activeAiModel.split("/").pop() + ")…"
+        case "error":
+            return doneText.length > 0 ? doneText : "Error"
+        default:
+            return "Idle"
         }
     }
 
@@ -659,9 +676,10 @@ PluginComponent {
     // sides half height
     component WaveIcon: Item {
         id: wave
-        property color barColor: Theme.surfaceText
-        implicitWidth: Theme.iconSize - 6
-        implicitHeight: Theme.iconSize - 6
+        property color barColor: Theme.widgetIconColor
+        property int size: Theme.iconSize - 6
+        implicitWidth: size
+        implicitHeight: size
         width: implicitWidth
         height: implicitHeight
 
@@ -684,17 +702,6 @@ PluginComponent {
         }
     }
 
-    pillClickAction: () => root.toggleRecording()
-
-    // triggerPopout() routes into pillClickAction when set, so blank it
-    // for the duration of the call to reach the plugin-popout path
-    pillRightClickAction: () => {
-        const saved = root.pillClickAction
-        root.pillClickAction = null
-        root.triggerPopout()
-        root.pillClickAction = saved
-    }
-
     horizontalBarPill: Component {
         Row {
             spacing: Theme.spacingXS
@@ -702,6 +709,7 @@ PluginComponent {
             WaveIcon {
                 visible: root.sttState === "idle"
                 barColor: root.pillColor()
+                size: root.iconSize
                 anchors.verticalCenter: parent.verticalCenter
             }
 
@@ -709,7 +717,7 @@ PluginComponent {
                 id: hIcon
                 visible: root.sttState !== "idle"
                 name: root.pillIcon()
-                size: Theme.iconSize - 6
+                size: root.iconSize
                 color: root.pillColor()
                 anchors.verticalCenter: parent.verticalCenter
 
@@ -726,7 +734,7 @@ PluginComponent {
                 visible: root.sttState === "recording" || root.sttState === "transcribing"
                 text: root.sttState === "recording" ? root.formatElapsed() : "…"
                 color: root.pillColor()
-                font.pixelSize: Theme.fontSizeMedium
+                font.pixelSize: Theme.barTextSize(root.barThickness)
                 anchors.verticalCenter: parent.verticalCenter
             }
         }
@@ -739,6 +747,7 @@ PluginComponent {
             WaveIcon {
                 visible: root.sttState === "idle"
                 barColor: root.pillColor()
+                size: root.iconSizeLarge
                 anchors.horizontalCenter: parent.horizontalCenter
             }
 
@@ -746,7 +755,7 @@ PluginComponent {
                 id: vIcon
                 visible: root.sttState !== "idle"
                 name: root.pillIcon()
-                size: Theme.iconSize - 6
+                size: root.iconSizeLarge
                 color: root.pillColor()
                 anchors.horizontalCenter: parent.horizontalCenter
 
@@ -963,33 +972,16 @@ PluginComponent {
             detailsText: "Local dictation · " + root.modelName + " · Mod+Shift+D / Mod+Shift+A (AI)"
             showCloseButton: true
 
-            Column {
-                width: parent.width
-                spacing: Theme.spacingM
-
+            headerActions: Component {
                 Row {
-                    spacing: Theme.spacingS
-
-                    DankButton {
-                        text: root.sttState === "recording" ? "Stop & transcribe" : "Start recording"
-                        iconName: root.sttState === "recording" ? "stop" : "mic"
-                        backgroundColor: root.sttState === "recording" ? Theme.error : Theme.primary
-                        onClicked: root.toggleRecording()
-                    }
-
-                    DankActionButton {
-                        iconName: "auto_awesome"
-                        tooltipText: root.sttState === "recording" ? "Stop & transcribe with AI" : "Record with AI transcription"
-                        buttonSize: 40
-                        anchors.verticalCenter: parent.verticalCenter
-                        onClicked: root.toggleAiRecording()
-                    }
+                    spacing: Theme.spacingXS
 
                     DankActionButton {
                         iconName: "settings"
+                        iconColor: Theme.surfaceVariantText
+                        buttonSize: 28
                         tooltipText: "Settings & models"
-                        buttonSize: 40
-                        anchors.verticalCenter: parent.verticalCenter
+                        tooltipSide: "bottom"
                         onClicked: {
                             popoutRoot.closePopout()
                             root.openSettingsPage()
@@ -998,85 +990,167 @@ PluginComponent {
 
                     DankActionButton {
                         iconName: "delete_sweep"
+                        iconColor: Theme.surfaceVariantText
+                        buttonSize: 28
                         tooltipText: "Clear history"
-                        buttonSize: 40
-                        anchors.verticalCenter: parent.verticalCenter
+                        tooltipSide: "bottom"
                         onClicked: root.clearHistory()
+                    }
+                }
+            }
+
+            Column {
+                width: parent.width
+                spacing: Theme.spacingM
+
+                // Recording control card
+                StyledRect {
+                    width: parent.width
+                    height: 64
+                    radius: Theme.cornerRadius
+                    color: Theme.surfaceContainerHigh
+
+                    Column {
+                        anchors.left: parent.left
+                        anchors.leftMargin: Theme.spacingM
+                        anchors.right: recControls.left
+                        anchors.rightMargin: Theme.spacingM
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 1
+
+                        StyledText {
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: root.stateLabel()
+                            font.weight: Font.Medium
+                            color: root.pillColor()
+                        }
+
+                        StyledText {
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: root.aiSession ? ("AI · " + root.activeAiModel.split("/").pop()) : ("Local · " + root.modelName)
+                            font.pixelSize: Theme.fontSizeSmall
+                            color: Theme.surfaceVariantText
+                        }
+                    }
+
+                    Row {
+                        id: recControls
+                        anchors.right: parent.right
+                        anchors.rightMargin: Theme.spacingM
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Theme.spacingS
+
+                        DankButton {
+                            text: root.sttState === "recording" ? "Stop" : "Record"
+                            iconName: root.sttState === "recording" ? "stop" : "mic"
+                            backgroundColor: root.sttState === "recording" ? Theme.error : Theme.primary
+                            buttonHeight: 36
+                            onClicked: root.toggleRecording()
+                        }
+
+                        DankActionButton {
+                            iconName: "auto_awesome"
+                            tooltipText: root.sttState === "recording" ? "Stop & transcribe with AI" : "Record with AI transcription"
+                            tooltipSide: "bottom"
+                            buttonSize: 36
+                            onClicked: root.toggleAiRecording()
+                        }
                     }
                 }
 
                 StyledText {
-                    text: root.history.length > 0 ? "Recent transcripts (click to copy)" : "No transcripts yet — hit the mic and start talking."
+                    text: "Recent transcripts (click to copy)"
                     font.pixelSize: Theme.fontSizeSmall
                     color: Theme.surfaceVariantText
+                    visible: root.history.length > 0
                 }
 
-                ListView {
+                StyledRect {
                     width: parent.width
-                    height: 280
-                    clip: true
-                    spacing: Theme.spacingXS
-                    model: root.history
+                    height: 296
+                    radius: Theme.cornerRadius
+                    color: Theme.surfaceContainerHigh
 
-                    delegate: Rectangle {
-                        required property var modelData
-                        required property int index
+                    StyledText {
+                        visible: root.history.length === 0
+                        anchors.centerIn: parent
+                        width: parent.width - Theme.spacingXL * 2
+                        horizontalAlignment: Text.AlignHCenter
+                        text: "No transcripts yet — hit the mic and start talking."
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.surfaceVariantText
+                        wrapMode: Text.Wrap
+                    }
 
-                        width: ListView.view.width
-                        height: entryColumn.implicitHeight + Theme.spacingM
-                        radius: Theme.cornerRadius
-                        color: entryArea.containsMouse ? Theme.surfaceContainerHighest : Theme.surfaceContainerHigh
+                    ListView {
+                        anchors.fill: parent
+                        anchors.margins: Theme.spacingS
+                        clip: true
+                        spacing: Theme.spacingXS
+                        model: root.history
 
-                        MouseArea {
-                            id: entryArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                Quickshell.execDetached(["dms", "cl", "copy", modelData.text])
-                                if (typeof ToastService !== "undefined")
-                                    ToastService.showInfo("Copied to clipboard")
-                            }
-                        }
+                        delegate: Rectangle {
+                            required property var modelData
+                            required property int index
 
-                        Column {
-                            id: entryColumn
-                            anchors.left: parent.left
-                            anchors.right: retypeButton.left
-                            anchors.leftMargin: Theme.spacingM
-                            anchors.rightMargin: Theme.spacingS
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: 2
+                            width: ListView.view.width
+                            height: entryColumn.implicitHeight + Theme.spacingM
+                            radius: Theme.cornerRadius
+                            color: entryArea.containsMouse ? Theme.surfaceContainerHighest : "transparent"
 
-                            StyledText {
-                                width: parent.width
-                                text: modelData.text
-                                color: Theme.surfaceText
-                                font.pixelSize: Theme.fontSizeSmall
-                                wrapMode: Text.Wrap
-                                maximumLineCount: 2
-                                elide: Text.ElideRight
+                            MouseArea {
+                                id: entryArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    Quickshell.execDetached(["dms", "cl", "copy", modelData.text])
+                                    if (typeof ToastService !== "undefined")
+                                        ToastService.showInfo("Copied to clipboard")
+                                }
                             }
 
-                            StyledText {
-                                text: Qt.formatDateTime(new Date(modelData.ts), "hh:mm · MMM d")
-                                color: Theme.surfaceVariantText
-                                font.pixelSize: Theme.fontSizeSmall - 1
-                            }
-                        }
+                            Column {
+                                id: entryColumn
+                                anchors.left: parent.left
+                                anchors.right: retypeButton.left
+                                anchors.leftMargin: Theme.spacingM
+                                anchors.rightMargin: Theme.spacingS
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 2
 
-                        DankActionButton {
-                            id: retypeButton
-                            iconName: "keyboard"
-                            tooltipText: "Type at cursor"
-                            buttonSize: 30
-                            anchors.right: parent.right
-                            anchors.rightMargin: Theme.spacingS
-                            anchors.verticalCenter: parent.verticalCenter
-                            onClicked: {
-                                popoutRoot.closePopout()
-                                // give focus time to return to the previous window
-                                root.typeOut(modelData.text, 450)
+                                StyledText {
+                                    width: parent.width
+                                    text: modelData.text
+                                    color: Theme.surfaceText
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    wrapMode: Text.Wrap
+                                    maximumLineCount: 2
+                                    elide: Text.ElideRight
+                                }
+
+                                StyledText {
+                                    text: Qt.formatDateTime(new Date(modelData.ts), "hh:mm · MMM d")
+                                    color: Theme.surfaceVariantText
+                                    font.pixelSize: Theme.fontSizeSmall - 1
+                                }
+                            }
+
+                            DankActionButton {
+                                id: retypeButton
+                                iconName: "keyboard"
+                                tooltipText: "Type at cursor"
+                                buttonSize: 30
+                                anchors.right: parent.right
+                                anchors.rightMargin: Theme.spacingS
+                                anchors.verticalCenter: parent.verticalCenter
+                                onClicked: {
+                                    popoutRoot.closePopout()
+                                    // give focus time to return to the previous window
+                                    root.typeOut(modelData.text, 450)
+                                }
                             }
                         }
                     }
