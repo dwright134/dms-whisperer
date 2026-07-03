@@ -696,7 +696,7 @@ PluginComponent {
                 Rectangle {
                     required property real modelData
                     width: Math.max(3, Math.round(wave.width * 0.17))
-                    height: Math.max(4, Math.round(wave.height * 0.95 * modelData))
+                    height: Math.max(4, Math.round(wave.height * 0.8 * modelData))
                     radius: width / 2
                     color: wave.barColor
                     anchors.verticalCenter: parent.verticalCenter
