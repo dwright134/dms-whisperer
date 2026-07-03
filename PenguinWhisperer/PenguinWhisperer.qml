@@ -128,12 +128,15 @@ PluginComponent {
         if (!soundCues)
             return
         const cues = {
-            start: "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga",
-            done: "/usr/share/sounds/freedesktop/stereo/complete.oga",
-            error: "/usr/share/sounds/freedesktop/stereo/dialog-error.oga"
+            start: "Sounds/open.oga",
+            done: "Sounds/close.oga",
+            error: "Sounds/error.oga"
         }
-        if (cues[kind])
-            Quickshell.execDetached(["pw-play", cues[kind]])
+        if (cues[kind]) {
+            const path = decodeURIComponent(
+                Qt.resolvedUrl(cues[kind]).toString().replace(/^file:\/\//, ""))
+            Quickshell.execDetached(["pw-play", path])
+        }
     }
 
     function toggleRecording() {
