@@ -2,7 +2,7 @@
     "id": "penguinWhisperer",
     "name": "Penguin Whisperer",
     "description": "Push-to-talk dictation: records your voice, transcribes it locally with whisper.cpp, and types the result at the cursor",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "author": "dwright",
     "type": "widget",
     "capabilities": ["dankbar-widget"],

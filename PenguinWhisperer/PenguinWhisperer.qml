@@ -712,7 +712,7 @@ PluginComponent {
             WaveIcon {
                 visible: root.sttState === "idle"
                 barColor: root.pillColor()
-                size: root.iconSize
+                size: root.iconSizeLarge
                 anchors.verticalCenter: parent.verticalCenter
             }
 
@@ -720,7 +720,7 @@ PluginComponent {
                 id: hIcon
                 visible: root.sttState !== "idle"
                 name: root.pillIcon()
-                size: root.iconSize
+                size: root.iconSizeLarge
                 color: root.pillColor()
                 anchors.verticalCenter: parent.verticalCenter
 
