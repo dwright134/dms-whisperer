@@ -85,18 +85,28 @@ PluginSettings {
             return null
         }
 
+        // Keys live in the login keyring (gnome-keyring), not the settings JSON.
+        // The real value is loaded back masked so the bullet count reflects the
+        // stored key and blanking the field still clears it.
         function loadValue() {
-            const settings = findSettings()
-            if (settings) {
-                const loaded = settings.loadValue(settingKey, defaultValue)
-                if (textField.activeFocus && isInitialized)
-                    return
-                value = loaded
-                // Load the real key masked, so the bullet count reflects the
-                // stored value and the field reads as "set" at a glance.
-                textField.text = loaded
-                isInitialized = true
-            }
+            Proc.runCommand("penguinWhisperer.key.show." + settingKey,
+                            ["secret-tool", "lookup", "service", "penguin-whisperer", "key", settingKey],
+                            (out, code) => {
+                                if (textField.activeFocus && isInitialized)
+                                    return
+                                let loaded = code === 0 ? out.replace(/\n+$/, "") : ""
+                                if (loaded.length === 0) {
+                                    // Pre-migration fallback: an older build may
+                                    // still hold the key in plaintext JSON until
+                                    // the widget migrates it to the keyring.
+                                    const settings = findSettings()
+                                    if (settings)
+                                        loaded = settings.loadValue(settingKey, defaultValue)
+                                }
+                                value = loaded
+                                textField.text = loaded
+                                isInitialized = true
+                            })
         }
 
         function commit() {
@@ -106,8 +116,33 @@ PluginSettings {
                 return
             value = textField.text
             const settings = findSettings()
-            if (settings)
-                settings.saveValue(settingKey, value)
+            if (value.length > 0) {
+                // Store into the keyring (secret via env, never argv). On success
+                // purge any plaintext JSON copy and flip the "<key>Set" flag —
+                // that flag change is what notifies the widget to reload.
+                const p = Qt.createQmlObject('import Quickshell.Io; Process { running: false }', secret)
+                p.environment = ({ "PW_SECRET": value })
+                p.command = ["sh", "-c",
+                             "printf %s \"$PW_SECRET\" | secret-tool store --label=\"Penguin Whisperer API key\" service \"$1\" key \"$2\"",
+                             "sh", "penguin-whisperer", settingKey]
+                p.exited.connect(code => {
+                    if (code === 0 && settings) {
+                        settings.saveValue(settingKey, "")
+                        settings.saveValue(settingKey + "Set", true)
+                    }
+                    p.destroy()
+                })
+                p.running = true
+            } else {
+                // Cleared: drop it from the keyring and record "not set".
+                Proc.runCommand("penguinWhisperer.key.clear." + settingKey,
+                                ["secret-tool", "clear", "service", "penguin-whisperer", "key", settingKey],
+                                (out, code) => {})
+                if (settings) {
+                    settings.saveValue(settingKey, "")
+                    settings.saveValue(settingKey + "Set", false)
+                }
+            }
         }
 
         Component.onCompleted: Qt.callLater(loadValue)
@@ -393,11 +428,19 @@ PluginSettings {
     }
 
     function fetchGoogleModels() {
-        const key = PluginService.loadPluginData(pluginId, "googleApiKey", "").trim()
-        if (key.length > 0 && !googleModelFetch.running) {
-            googleFetchKey = key
-            googleModelFetch.running = true
-        }
+        if (googleModelFetch.running)
+            return
+        Proc.runCommand("penguinWhisperer.key.googleFetch",
+                        ["secret-tool", "lookup", "service", "penguin-whisperer", "key", "googleApiKey"],
+                        (out, code) => {
+                            let key = code === 0 ? out.replace(/\n+$/, "") : ""
+                            if (key.length === 0)
+                                key = PluginService.loadPluginData(pluginId, "googleApiKey", "").trim()
+                            if (key.length > 0 && !googleModelFetch.running) {
+                                googleFetchKey = key
+                                googleModelFetch.running = true
+                            }
+                        })
     }
 
     // Pick up a freshly pasted Google key without reopening the page
@@ -681,7 +724,7 @@ PluginSettings {
         SecretSetting {
             settingKey: "aiApiKey"
             label: "OpenRouter API key"
-            description: "Create one at openrouter.ai/keys. Stored in plugin settings; sent only to openrouter.ai."
+            description: "Create one at openrouter.ai/keys. Stored in your login keyring; sent only to openrouter.ai."
             placeholder: "sk-or-v1-…"
             defaultValue: ""
         }
@@ -706,7 +749,7 @@ PluginSettings {
         SecretSetting {
             settingKey: "googleApiKey"
             label: "Google AI Studio API key"
-            description: "Free tier available — create one at aistudio.google.com/apikey. Stored in plugin settings; sent only to generativelanguage.googleapis.com."
+            description: "Free tier available — create one at aistudio.google.com/apikey. Stored in your login keyring; sent only to generativelanguage.googleapis.com."
             placeholder: "AIza…"
             defaultValue: ""
         }

@@ -116,15 +116,57 @@ PluginComponent {
         customWords = PluginService.loadPluginData(whispererId, "customWords", [])
         snippets = PluginService.loadPluginData(whispererId, "snippets", [])
         aiProvider = PluginService.loadPluginData(whispererId, "aiProvider", "openrouter")
-        aiApiKey = PluginService.loadPluginData(whispererId, "aiApiKey", "")
+        loadApiKey("aiApiKey", k => aiApiKey = k)
         aiModel = PluginService.loadPluginData(whispererId, "aiModel", "google/gemini-3.5-flash")
-        googleApiKey = PluginService.loadPluginData(whispererId, "googleApiKey", "")
+        loadApiKey("googleApiKey", k => googleApiKey = k)
         googleModel = PluginService.loadPluginData(whispererId, "googleModel", "gemini-2.5-flash")
         aiStyle = PluginService.loadPluginData(whispererId, "aiStyle", "")
         overlayPosition = PluginService.loadPluginData(whispererId, "overlayPosition", "bottom")
         autoStopEnabled = PluginService.loadPluginData(whispererId, "autoStopEnabled", false)
         autoStopSeconds = PluginService.loadPluginData(whispererId, "autoStopSeconds", 3)
         history = PluginService.loadPluginData(whispererId, "history", [])
+    }
+
+    // API keys live in the login keyring (gnome-keyring, via secret-tool), never
+    // in the plugin settings JSON — that file is world-readable and is often
+    // synced into a dotfiles repo. Only a boolean "<key>Set" flag is persisted.
+    readonly property string keyringService: "penguin-whisperer"
+
+    // Look a key up from the keyring; if it isn't there but an older build left
+    // a plaintext copy in the JSON, migrate that copy into the keyring once.
+    function loadApiKey(attr, apply) {
+        Proc.runCommand("penguinWhisperer.key.load." + attr,
+                        ["secret-tool", "lookup", "service", keyringService, "key", attr],
+                        (out, code) => {
+                            let key = code === 0 ? out.replace(/\n+$/, "") : ""
+                            if (key.length === 0) {
+                                const legacy = PluginService.loadPluginData(whispererId, attr, "").trim()
+                                if (legacy.length > 0) {
+                                    key = legacy
+                                    storeApiKey(attr, legacy)
+                                }
+                            }
+                            apply(key)
+                        })
+    }
+
+    // Write a key into the keyring. The secret goes through the environment, not
+    // argv, so it never appears in the process list. On success the plaintext
+    // JSON copy is purged and the "<attr>Set" flag is recorded.
+    function storeApiKey(attr, key) {
+        const p = Qt.createQmlObject('import Quickshell.Io; Process { running: false }', root)
+        p.environment = ({ "PW_SECRET": key })
+        p.command = ["sh", "-c",
+                     "printf %s \"$PW_SECRET\" | secret-tool store --label=\"Penguin Whisperer API key\" service \"$1\" key \"$2\"",
+                     "sh", keyringService, attr]
+        p.exited.connect(code => {
+            if (code === 0) {
+                PluginService.savePluginData(whispererId, attr, "")
+                PluginService.savePluginData(whispererId, attr + "Set", true)
+            }
+            p.destroy()
+        })
+        p.running = true
     }
 
     Component.onCompleted: loadSettings()

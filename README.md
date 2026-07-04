@@ -59,8 +59,9 @@ Mod+Shift+D / click mic pill
     `gemini-2.5-flash`).
 
   Pressing `Mod+Shift+A` while already recording upgrades that recording to AI mode. On any
-  API failure it falls back to local whisper so the dictation isn't lost. Keys are passed to
-  curl via the environment, never argv.
+  API failure it falls back to local whisper so the dictation isn't lost. Keys are stored in
+  the login keyring (gnome-keyring, via `secret-tool`) — never in the settings JSON — and are
+  passed to curl via the environment, never argv.
 - **Sound cues**: freedesktop chimes on start / done / error (toggleable).
 - **Silence gate**: if the recording's peak level is below -40 dB, transcription is skipped
   entirely (no whisper hallucinations typed into the focused window). Non-speech tokens are
