@@ -65,15 +65,22 @@ PluginComponent {
 
     readonly property string modelName: modelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
 
-    // Custom vocabulary is fed to whisper as an initial prompt, which biases
-    // decoding toward these spellings (same approach as Superwhisper).
-    // Snippet triggers are included so they transcribe verbatim and match.
-    readonly property string vocabPrompt: {
-        const words = (customWords || [])
+    // Custom vocabulary + snippet triggers, cleaned: the exact terms whisper
+    // and the AI prompt should bias toward. Shared by vocabPrompt (below) and
+    // aiSystemPrompt().
+    function vocabWords() {
+        return (customWords || [])
             .map(w => typeof w === "string" ? w : (w && w.word ? w.word : ""))
             .concat((snippets || []).map(s => s && s.trigger ? s.trigger : ""))
             .map(w => w.trim())
             .filter(w => w.length > 0)
+    }
+
+    // Custom vocabulary is fed to whisper as an initial prompt, which biases
+    // decoding toward these spellings (same approach as Superwhisper).
+    // Snippet triggers are included so they transcribe verbatim and match.
+    readonly property string vocabPrompt: {
+        const words = vocabWords()
         return words.length > 0 ? "Glossary: " + words.join(", ") + "." : ""
     }
 
@@ -245,30 +252,29 @@ PluginComponent {
             ToastService.showInfo("Penguin Whisperer: no speech detected")
     }
 
+    // True if ch is a cased letter (any script), a digit, or an uncased-script
+    // char (CJK etc.). Char-by-char rather than a \p{L}/\p{N} regex because
+    // QML's V4 engine silently no-ops those property escapes.
+    function isSpeechChar(ch) {
+        return ch.toLowerCase() !== ch.toUpperCase()   // cased letter
+            || (ch >= "0" && ch <= "9")                // digit
+            || ch.charCodeAt(0) > 0x2E80               // CJK and other uncased scripts
+    }
+
     // True if the string contains at least one letter (any script) or digit
     function hasSpeechChars(s) {
-        for (const ch of s) {
-            if (ch.toLowerCase() !== ch.toUpperCase())
+        for (const ch of s)
+            if (isSpeechChar(ch))
                 return true
-            if (ch >= "0" && ch <= "9")
-                return true
-            if (ch.charCodeAt(0) > 0x2E80)  // CJK and other uncased scripts
-                return true
-        }
         return false
     }
 
     // Loose comparison for spoken snippet triggers: case, punctuation, and
-    // extra whitespace don't count. Char-by-char like hasSpeechChars because
-    // QML's V4 engine silently no-ops \p{L}/\p{N} regex property escapes.
+    // extra whitespace don't count. Non-speech chars collapse to spaces.
     function normalizePhrase(s) {
         let out = ""
-        for (const ch of s.toLowerCase()) {
-            const isLetter = ch.toLowerCase() !== ch.toUpperCase()
-            const isDigit = ch >= "0" && ch <= "9"
-            const isUncased = ch.charCodeAt(0) > 0x2E80  // CJK etc.
-            out += (isLetter || isDigit || isUncased) ? ch : " "
-        }
+        for (const ch of s.toLowerCase())
+            out += isSpeechChar(ch) ? ch : " "
         return out.replace(/\s+/g, " ").trim()
     }
 
@@ -471,11 +477,7 @@ PluginComponent {
               + "language of the speaker. Output ONLY the final text, with no preamble, quotes, or commentary."
         // Snippet triggers ride along so they transcribe verbatim and the
         // whole-dictation trigger match can fire on AI transcripts too
-        const words = (customWords || [])
-            .map(w => typeof w === "string" ? w : (w && w.word ? w.word : ""))
-            .concat((snippets || []).map(s => s && s.trigger ? s.trigger : ""))
-            .map(w => w.trim())
-            .filter(w => w.length > 0)
+        const words = vocabWords()
         if (words.length > 0)
             p += "\n\nThe speaker often uses these terms; use these exact spellings when you hear them: "
                + words.join(", ") + "."
