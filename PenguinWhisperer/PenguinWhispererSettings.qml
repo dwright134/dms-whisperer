@@ -295,8 +295,13 @@ PluginSettings {
         const path = modelFullPath(model.name)
         Proc.runCommand("penguinWhisperer.download." + model.name,
                         ["sh", "-c",
-                         "mkdir -p \"$(dirname \"$1\")\" && curl -L -sS -f -o \"$1.part\" \"$2\" && mv \"$1.part\" \"$1\"",
-                         "_", path, hfBase + modelFile(model.name)],
+                         // Reject a truncated/garbage download (e.g. a 200 that
+                         // returns an error page) before it lands as a real model
+                         // and whisper fails later with a cryptic error.
+                         "mkdir -p \"$(dirname \"$1\")\" && curl -L -sS -f -o \"$1.part\" \"$2\" && " +
+                         "if [ -n \"$3\" ] && [ \"$(stat -c %s \"$1.part\" 2>/dev/null)\" != \"$3\" ]; then echo size-mismatch; exit 3; fi && " +
+                         "mv \"$1.part\" \"$1\"",
+                         "_", path, hfBase + modelFile(model.name), String(model.bytes || "")],
                         (out, code) => {
                             const done = Object.assign({}, downloadPercent)
                             delete done[model.name]
@@ -312,7 +317,9 @@ PluginSettings {
                                 Proc.runCommand("penguinWhisperer.cleanupPart." + model.name,
                                                 ["rm", "-f", path + ".part"], () => {})
                                 if (typeof ToastService !== "undefined")
-                                    ToastService.showError("Download of " + model.name + " failed")
+                                    ToastService.showError(code === 3
+                                        ? model.name + " download was corrupted (size mismatch) — please retry"
+                                        : "Download of " + model.name + " failed")
                             }
                             refresh()
                         },
