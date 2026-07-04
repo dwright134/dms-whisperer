@@ -14,9 +14,13 @@ PluginComponent {
     readonly property string home: Quickshell.env("HOME")
     readonly property string recordingPath: "/tmp/penguin-whisperer-recording.wav"
     readonly property int maxRecordSeconds: 300
+    // whisper-cli CPU threads (-t)
+    readonly property int transcribeThreads: 4
     // Peak level below this is treated as silence and never sent to whisper,
     // avoiding hallucinated transcripts ("Thank you." etc.) being typed
     readonly property real silenceThresholdDb: -40
+    // |sample| ceiling for s16 (signed 16-bit) audio, for dBFS conversion
+    readonly property int s16PeakMax: 32768
 
     // idle | recording | stopping | transcribing | polishing | error
     property string sttState: "idle"
@@ -62,6 +66,8 @@ PluginComponent {
 
     readonly property string activeAiKey: aiProvider === "google" ? googleApiKey : aiApiKey
     readonly property string activeAiModel: aiProvider === "google" ? googleModel : aiModel
+    // Bare model name for display (drops the "vendor/" prefix)
+    readonly property string activeAiModelShort: activeAiModel.split("/").pop()
 
     readonly property string modelName: modelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
 
@@ -192,7 +198,7 @@ PluginComponent {
         }
         // Bar height follows dB so it looks lively at any capture volume:
         // -50 dBFS (quiet) .. -10 dBFS (loud speech) maps to 0..1
-        const db = 20 * Math.log10(Math.max(peak, 1) / 32768)
+        const db = 20 * Math.log10(Math.max(peak, 1) / s16PeakMax)
         levelHistory = levelHistory.slice(1).concat([Math.max(0, Math.min(1, (db + 50) / 40))])
         if (sttState !== "recording")
             return
@@ -378,7 +384,7 @@ PluginComponent {
         case "transcribing":
             return "Transcribing (" + modelName + ")…"
         case "polishing":
-            return "Transcribing with AI (" + activeAiModel.split("/").pop() + ")…"
+            return "Transcribing with AI (" + activeAiModelShort + ")…"
         case "error":
             return doneText.length > 0 ? doneText : "Error"
         default:
@@ -439,7 +445,7 @@ PluginComponent {
                          "-m", root.modelPath,
                          "-f", root.recordingPath,
                          "-l", root.language,
-                         "-t", "4",
+                         "-t", String(root.transcribeThreads),
                          "--no-timestamps", "--no-prints", "--suppress-nst"]
             if (root.vocabPrompt.length > 0)
                 cmd.push("--prompt", root.vocabPrompt, "--carry-initial-prompt")
@@ -573,10 +579,12 @@ PluginComponent {
                     }
                 } catch (e) {}
             }
-            // Fall back to local whisper so the dictation isn't lost
+            // Fall back to local whisper so the dictation isn't lost. This is a
+            // recovery, not the final outcome — show it as info so we don't stack
+            // a second error toast if whisper then fails via fail().
             console.warn("PenguinWhisperer: AI transcription failed:", aiErr.text.trim(), aiOut.text.slice(0, 300))
             if (typeof ToastService !== "undefined")
-                ToastService.showError("Penguin Whisperer: AI transcription failed — falling back to whisper")
+                ToastService.showInfo("Penguin Whisperer: AI transcription failed — falling back to whisper")
             root.sttState = "transcribing"
             transcriber.running = true
         }
@@ -930,7 +938,7 @@ PluginComponent {
 
                 StyledText {
                     text: root.sttState === "polishing"
-                          ? "Transcribing with AI (" + root.activeAiModel.split("/").pop() + ")…"
+                          ? "Transcribing with AI (" + root.activeAiModelShort + ")…"
                           : "Transcribing (" + root.modelName + ")…"
                     color: Theme.surfaceText
                     font.pixelSize: Theme.fontSizeMedium
@@ -1034,7 +1042,7 @@ PluginComponent {
                         StyledText {
                             width: parent.width
                             elide: Text.ElideRight
-                            text: root.aiSession ? ("AI · " + root.activeAiModel.split("/").pop()) : ("Local · " + root.modelName)
+                            text: root.aiSession ? ("AI · " + root.activeAiModelShort) : ("Local · " + root.modelName)
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.surfaceVariantText
                         }
