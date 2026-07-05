@@ -506,8 +506,8 @@ PluginComponent {
         doneText = message
         doneLingerTimer.restart()
         playCue("error")
-        if (typeof ToastService !== "undefined")
-            ToastService.showError("Whisperer: " + message)
+        // No toast — the overlay flash above already reports this. The message
+        // is still logged via console.warn for after-the-fact debugging.
         errorResetTimer.restart()
     }
 
