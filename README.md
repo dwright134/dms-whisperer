@@ -7,6 +7,12 @@ cloud AI transcription cleans up and formats in one pass.
 Built as a [DankMaterialShell](https://danklinux.com) (quickshell) bar-widget plugin for
 niri/Wayland.
 
+<p align="center">
+  <img src="docs/popout.png" alt="Whisperer popout — status, Record/AI buttons, and recent transcripts" width="360">
+  <br>
+  <em>The popout: dictation controls plus your recent transcripts (click to copy, keyboard icon to re-type at the cursor).</em>
+</p>
+
 ## How it works
 
 ```
