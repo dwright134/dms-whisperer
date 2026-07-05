@@ -1,9 +1,8 @@
 # Whisperer
 
-A minimal Linux take on [Superwhisper](https://superwhisper.com): push-to-talk dictation that
-records your voice, transcribes it **locally** with whisper.cpp, and types the result wherever
-your cursor is focused (plus copies it to the clipboard). Optional cloud AI transcription cleans
-up and formats in one pass.
+Push-to-talk dictation for Linux: records your voice, transcribes it **locally** with whisper.cpp,
+and types the result wherever your cursor is focused (plus copies it to the clipboard). Optional
+cloud AI transcription cleans up and formats in one pass.
 
 Built as a [DankMaterialShell](https://danklinux.com) (quickshell) bar-widget plugin for
 niri/Wayland.
@@ -140,7 +139,7 @@ cp whisper.cpp/build/bin/whisper-cli ~/.local/bin/   # ~/.local/bin is on PATH
 - **IPC** (the primary interface, bind it to any key you like): `dms ipc call whisperer
   toggle|toggleAi|start|startAi|stop|cancel|status`. `toggle` is local dictation, `toggleAi` is
   AI-cleanup dictation; running `toggleAi` mid-recording upgrades the current recording to AI mode.
-- **Overlay** (Superwhisper style, bottom- or top-center): live waveform of real mic levels while
+- **Overlay** (bottom- or top-center): live waveform of real mic levels while
   recording (click it to stop, `Esc` to cancel), bouncing dots while transcribing, transcript
   preview flash when done.
 - **Popout** (click the pill): **Record** / **AI** buttons to start dictation, last 20 transcripts
