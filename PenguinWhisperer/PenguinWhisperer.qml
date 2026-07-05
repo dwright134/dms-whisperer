@@ -111,7 +111,7 @@ PluginComponent {
     }
 
     // Overlay state
-    readonly property bool overlayActive: sttState === "recording" || sttState === "stopping" || sttState === "transcribing" || sttState === "polishing"
+    readonly property bool overlayActive: sttState === "recording" || sttState === "stopping" || sttState === "cancelling" || sttState === "transcribing" || sttState === "polishing"
     readonly property bool overlayShown: overlayActive || doneLingerTimer.running
     property bool overlayWindowVisible: false
     property string doneKind: ""   // "ok" | "error"
@@ -396,6 +396,34 @@ PluginComponent {
         recorder.signal(2)
     }
 
+    // Abort the current recording without transcribing or typing anything.
+    // Bound to Escape while the overlay holds focus, and exposed over IPC.
+    function cancelRecording() {
+        if (sttState !== "recording" && sttState !== "stopping")
+            return
+        restoreMedia()   // resume any ducked players
+        if (recorder.running) {
+            // The "cancelling" sentinel tells recorder.onExited to tear down
+            // instead of transcribing (stopping) or reporting a crash (recording).
+            sttState = "cancelling"
+            recorder.signal(2)   // SIGINT → onExited runs finishCancel()
+        } else {
+            finishCancel()
+        }
+    }
+
+    function finishCancel() {
+        sttState = "idle"
+        aiSession = false
+        doneKind = "error"
+        doneText = "Cancelled"
+        doneLingerTimer.restart()
+        playCue("error")
+        // Discard the partial WAV so it can never be picked up by a later run
+        Proc.runCommand("penguinWhisperer.discardRecording",
+                        ["rm", "-f", recordingPath], () => {})
+    }
+
     function fail(message) {
         restoreMedia()   // never leave media paused because a recording errored out
         console.warn("PenguinWhisperer:", message)
@@ -579,7 +607,9 @@ PluginComponent {
             return c
         }
         onExited: exitCode => {
-            if (root.sttState === "stopping") {
+            if (root.sttState === "cancelling") {
+                root.finishCancel()
+            } else if (root.sttState === "stopping") {
                 root.sttState = root.aiSession && root.activeAiKey.trim().length > 0 ? "polishing" : "transcribing"
                 silenceCheck.running = true
             } else if (root.sttState === "recording") {
@@ -896,6 +926,11 @@ PluginComponent {
             return root.sttState
         }
 
+        function cancel(): string {
+            root.cancelRecording()
+            return root.sttState
+        }
+
         function status(): string {
             return root.sttState
         }
@@ -1009,7 +1044,10 @@ PluginComponent {
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.namespace: "quickshell:penguinWhispererOverlay"
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+        // Grab the keyboard only while recording so Escape can cancel; focus is
+        // released the moment recording stops, well before the transcript is
+        // typed, so wtype still lands in the user's window.
+        WlrLayershell.keyboardFocus: root.sttState === "recording" ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
 
         anchors.bottom: !root.overlayAtTop
         anchors.top: root.overlayAtTop
@@ -1050,6 +1088,26 @@ PluginComponent {
                 onClicked: {
                     if (root.sttState === "recording")
                         root.stopRecording()
+                }
+            }
+
+            // Catches Escape while the overlay owns the keyboard (recording).
+            // forceActiveFocus on entry because the surface only just grabbed
+            // the keyboard, so the item isn't focused yet by default.
+            Item {
+                id: escCatcher
+                anchors.fill: parent
+                focus: true
+                Keys.onEscapePressed: event => {
+                    root.cancelRecording()
+                    event.accepted = true
+                }
+                Connections {
+                    target: root
+                    function onSttStateChanged() {
+                        if (root.sttState === "recording")
+                            escCatcher.forceActiveFocus()
+                    }
                 }
             }
 
@@ -1185,6 +1243,18 @@ PluginComponent {
                     elide: Text.ElideRight
                     anchors.verticalCenter: parent.verticalCenter
                 }
+            }
+
+            // Cancel hint, tucked against the bottom edge while recording
+            StyledText {
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 5
+                text: "Esc to cancel · click or keybind to finish"
+                font.pixelSize: Theme.fontSizeSmall - 1
+                color: Theme.surfaceVariantText
+                opacity: 0.7
+                visible: root.sttState === "recording"
             }
         }
     }
