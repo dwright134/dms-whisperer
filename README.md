@@ -75,17 +75,8 @@ Update later with `git -C ~/.config/DankMaterialShell/plugins/whisperer pull`.
 3. **A keybind** (optional) — Whisperer doesn't claim any global shortcut. Dictation is started by
    **right-clicking the bar mic pill** (quick local toggle), from the **Record** / **AI** buttons
    in the popout (left-click the pill to open it), or via IPC (`dms ipc call whisperer toggle` /
-   `toggleAi`). If you want a hotkey, bind those IPC calls to whatever keys are free in your
-   compositor. For niri, add to `~/.config/niri/dms/binds.kdl` — picking keys that aren't already
-   taken:
-
-   ```kdl
-   // example — choose any free combo
-   Mod+Shift+D { spawn "dms" "ipc" "call" "whisperer" "toggle"; }
-   Mod+Shift+A { spawn "dms" "ipc" "call" "whisperer" "toggleAi"; }
-   ```
-
-   (This is a DMS-managed file — re-add the binds if DMS ever regenerates it.)
+   `toggleAi`). If you want a hotkey, bind those IPC calls to whatever keys are free — see
+   [Keybindings](#keybindings).
 
 Until a working whisper.cpp binary **and** a model are present, the Record button is disabled and
 tells you what's missing — nothing records a clip it can't transcribe. (AI mode only needs an API
@@ -144,6 +135,49 @@ cp whisper.cpp/build/bin/whisper-cli ~/.local/bin/   # ~/.local/bin is on PATH
   preview flash when done.
 - **Popout** (click the pill): **Record** / **AI** buttons to start dictation, last 20 transcripts
   (click to copy, keyboard icon to re-type at cursor), clear history, open settings.
+
+## Keybindings
+
+Whisperer claims no global shortcut of its own — you bind the IPC calls to whatever keys are free.
+The `whisperer` IPC target exposes these functions:
+
+| Function    | What it does                                                                 |
+|-------------|------------------------------------------------------------------------------|
+| `toggle`    | Start/stop **local** dictation (whisper.cpp)                                  |
+| `toggleAi`  | Start/stop **AI** dictation; run mid-recording to upgrade the take to AI mode |
+| `start`     | Start local dictation (no-op if already recording)                           |
+| `startAi`   | Start AI dictation (no-op if already recording)                              |
+| `stop`      | Stop recording and transcribe                                                |
+| `cancel`    | Discard the current recording without transcribing                           |
+| `status`    | Print the current state (`idle` / `recording` / `transcribing` / `error`)    |
+
+Each is invoked as `dms ipc call whisperer <function>`, e.g. `dms ipc call whisperer toggle`.
+
+### Binding from DMS Settings
+
+In **DMS Settings → Keybinds**, add a bind and set its action type to **Run Command** (not *DMS
+Action*), then enter:
+
+```
+dms ipc call whisperer toggle
+```
+
+> **Why not the "DMS Action" dropdown?** That dropdown is a fixed list of DMS's own built-in IPC
+> actions, baked into the shell — it doesn't discover plugin IPC handlers, so Whisperer (and any
+> other plugin) will never appear there. This is by design; **Run Command** is the supported path
+> for plugin IPC, and it runs the exact same call under the hood.
+
+### Binding directly in niri
+
+Or add the binds to `~/.config/niri/dms/binds.kdl` — picking keys that aren't already taken:
+
+```kdl
+// example — choose any free combo
+Mod+Shift+D { spawn "dms" "ipc" "call" "whisperer" "toggle"; }
+Mod+Shift+A { spawn "dms" "ipc" "call" "whisperer" "toggleAi"; }
+```
+
+(This is a DMS-managed file — re-add the binds if DMS ever regenerates it.)
 
 ## Features
 
