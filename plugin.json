@@ -2,7 +2,7 @@
     "id": "whisperer",
     "name": "Whisperer",
     "description": "Voice dictation: records your voice, transcribes it locally with whisper.cpp, and types the result at the cursor",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "author": "dwright",
     "screenshot": "https://raw.githubusercontent.com/dwright134/dms-whisperer/main/docs/popout.png",
     "screenshots": ["https://raw.githubusercontent.com/dwright134/dms-whisperer/main/docs/popout.png"],
