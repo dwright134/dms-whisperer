@@ -2,103 +2,211 @@
 
 A minimal Linux take on [Superwhisper](https://superwhisper.com): push-to-talk dictation that
 records your voice, transcribes it **locally** with whisper.cpp, and types the result wherever
-your cursor is focused (plus copies it to the clipboard).
+your cursor is focused (plus copies it to the clipboard). Optional cloud AI transcription cleans
+up and formats in one pass.
 
 Built as a [DankMaterialShell](https://danklinux.com) (quickshell) bar-widget plugin for
-niri/Wayland. Internal use; targets this machine's setup.
+niri/Wayland.
 
 ## How it works
 
 ```
-Mod+Shift+D / click mic pill
+right-click pill / popout Record button / IPC / your keybind
   → pw-record (PipeWire, 16kHz mono WAV → /tmp)
-  → whisper-cli (whisper.cpp, local ggml model)
+  → ffmpeg silence gate (skip empty clips)
+  → whisper-cli (whisper.cpp, local ggml model)   ── or ──   audio-capable AI model (OpenRouter / Gemini)
   → wtype (types transcript at focused cursor)
   + dms cl copy (clipboard)
 ```
 
-## Features
+## Requirements
 
-- **Bar pill**: speaker bars (idle; three vertical bars, tall middle) → red pulsing stop icon +
-  elapsed (recording) → waveform + "…" (transcribing). Left-click toggles recording;
-  right-click opens the popout.
-- **Recording overlay** (Superwhisper style, bottom- or top-center — selectable in settings):
-  live waveform driven by actual mic levels (bars scroll and only move when you speak) +
-  elapsed while recording (click it to stop), bouncing dots while transcribing, transcript
-  preview flash when done.
-- **Popout** (right-click the pill): record/stop button, last 20 transcripts (click to copy,
-  keyboard icon to re-type at cursor), clear history, open settings.
-- **Settings → Plugins → Whisperer**: model manager (download/delete/select tiny.en,
-  base.en, small.en, small multilingual, medium.en straight from Hugging Face with progress),
-  custom vocabulary, language (en/auto), auto-stop on silence + overlay position,
-  type-at-cursor / clipboard / sound-cue toggles, whisper-cli path.
-- **Custom vocabulary**: add names, jargon, and tricky spellings in settings; they're passed
-  to whisper as an initial prompt (`--prompt` + `--carry-initial-prompt`) to bias decoding
-  toward the right spellings. Keep the list to a few dozen entries — the prompt is capped at
-  ~224 tokens and biasing weakens as it grows.
-- **Voice snippets**: define trigger phrase → full text pairs in settings. The expansion is
-  typed when the *entire* dictation matches a trigger phrase (ignoring case and punctuation,
-  in both local and AI mode) — triggers inside longer sentences are left alone. Triggers are
-  fed into the transcriber's vocabulary prompt so they transcribe reliably. `\n` in the
-  expansion becomes a real line break.
-- **Newline-safe typing**: line breaks in typed output (AI formatting, snippet expansions)
-  are sent as Shift+Enter key events instead of literal Returns, so they insert a break in
-  chat-style inputs instead of submitting the message mid-dictation.
-- **AI transcription** (`Mod+Shift+A`): the audio recording itself is sent (base64, in-memory
-  pipe) to an audio-capable model, which transcribes *and* formats in one pass — fillers/false
-  starts removed, self-corrections applied, "new paragraph"-style commands honored — but the
-  model is told to never add breaks on its own (pauses aren't paragraphs), so output stays on
-  one line unless you ask. The custom vocabulary and snippet triggers are injected into the
-  prompt so jargon is spelled right without whisper in the loop. Two providers, configured in
-  tabs in settings with an "active provider" selector:
-  - **OpenRouter** — model dropdown fetched live from the catalog, filtered to audio-input
-    models (default `google/gemini-3.5-flash`). Requests carry `X-Title: Whisperer`
-    so a shared key shows usage per app.
-  - **Google (Gemini API)** — free-tier friendly; key from aistudio.google.com/apikey, model
-    dropdown fetched from the account's catalog once a key is set (default
-    `gemini-2.5-flash`).
+- **DankMaterialShell** ≥ 1.0.0 (the host shell)
+- **PipeWire** — `pw-record` (capture), `pw-cli` (echo-cancel), `pw-play` (sound cues)
+- **ffmpeg** — silence detection before transcription
+- **wtype** — types the transcript into the focused window
+- **whisper.cpp** — the `whisper-cli` binary (auto-detected on `PATH`; see [below](#whispercpp-binary)).
+  Required for **local** transcription; AI dictation doesn't need it (see below).
+- a **ggml model** — downloaded in-app from the settings model manager (local transcription only)
 
-  Pressing `Mod+Shift+A` while already recording upgrades that recording to AI mode. On any
-  API failure it falls back to local whisper so the dictation isn't lost. Keys are stored in
-  the login keyring (gnome-keyring, via `secret-tool`) — never in the settings JSON — and are
-  passed to curl via the environment, never argv.
-- **Sound cues**: freedesktop chimes on start / done / error (toggleable).
-- **Silence gate**: if the recording's peak level is below -40 dB, transcription is skipped
-  entirely (no whisper hallucinations typed into the focused window). Non-speech tokens are
-  also suppressed (`--suppress-nst`) and bracketed annotations scrubbed; output with no real
-  words is dropped.
-- **Keybinds**: `Mod+Shift+D` → toggle dictation, `Mod+Shift+A` → toggle AI-cleanup dictation
-  (in `~/.config/niri/dms/binds.kdl`).
-- **IPC**: `dms ipc call whisperer toggle|toggleAi|start|startAi|stop|status`.
-- **Auto-stop on silence** (off by default): when enabled, dictation stops on its own after a
-  configurable 1–15 s of silence. It only arms once you've actually said something, and voice
-  detection is relative to an adaptive noise floor, so mic volume and room noise don't need
-  tuning. When off, recording keeps going through thinking pauses until you click the pill or
-  hit the keybind again. Either way there's a 5-minute cap.
+Optional:
 
-## Layout
+- **secret-tool** (gnome-keyring) — stores AI API keys in the login keyring instead of the
+  settings JSON. Only needed for AI transcription.
+- **playerctl** — pauses media players while recording when PipeWire echo-cancellation isn't
+  available (fallback for "remove background music").
+- PipeWire **`libpipewire-module-echo-cancel`** — preferred path for removing speaker audio from
+  the recording.
 
-- `Whisperer/` — the DMS plugin (symlinked into `~/.config/DankMaterialShell/plugins/`)
-  - `plugin.json` — manifest
-  - `Whisperer.qml` — bar widget, state machine, overlay window, popout
-  - `WhispererSettings.qml` — settings UI + model manager
-- `vendor/whisper.cpp/` — whisper.cpp source + build (not tracked in git)
+## Installation
 
-## Installed pieces
+### From the DMS plugin registry (recommended)
 
-- `~/.local/bin/whisper-cli` — CPU build of whisper.cpp (AVX2/FMA)
-- `~/.local/share/whisperer/models/` — ggml models (base.en default, tiny.en fast)
-- `~/.config/niri/dms/binds.kdl` — holds the Mod+Shift+D bind (note: DMS-managed file;
-  re-add the bind if DMS ever regenerates it)
+Install straight from within DMS — no manual file management, and updates are one click/command:
 
-## Rebuilding whisper-cli
+- **In-app**: DMS Settings → **Plugins** → **Browse**, find *Whisperer*, and install.
+- **CLI**: `dms plugins install whisperer`
+
+This clones the plugin into `~/.config/DankMaterialShell/plugins/` and wires it up automatically.
+Update later with `dms plugins update whisperer`; remove with `dms plugins uninstall whisperer`.
+
+### Manual (git clone)
+
+Clone directly into the plugins directory — the repo root **is** the plugin (manifest at the top),
+so no symlink or subfolder juggling:
 
 ```fish
-cmake -S vendor/whisper.cpp -B vendor/whisper.cpp/build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
-ninja -C vendor/whisper.cpp/build whisper-cli
-cp vendor/whisper.cpp/build/bin/whisper-cli ~/.local/bin/
+git clone https://github.com/dwright134/dms-whisperer.git \
+  ~/.config/DankMaterialShell/plugins/whisperer
+
+systemctl --user reload dms.service   # or: dms restart
 ```
+
+DMS watches the plugins folder, so it's usually picked up immediately; the reload guarantees it.
+Update later with `git -C ~/.config/DankMaterialShell/plugins/whisperer pull`.
+
+### After installing
+
+1. **whisper.cpp binary** — see [below](#whispercpp-binary). The plugin finds it on `PATH`
+   automatically; the settings page shows a ✓ with the detected path (or a warning + re-detect
+   button if it's missing).
+2. **Download a model** — DMS Settings → Plugins → Whisperer → model manager. `base.en` is a good
+   default; `tiny.en` is fastest; `small`/`small.en` are more accurate; pick a multilingual model
+   (`small`) if you want language auto-detect.
+3. **A keybind** (optional) — Whisperer doesn't claim any global shortcut. Dictation is started by
+   **right-clicking the bar mic pill** (quick local toggle), from the **Record** / **AI** buttons
+   in the popout (left-click the pill to open it), or via IPC (`dms ipc call whisperer toggle` /
+   `toggleAi`). If you want a hotkey, bind those IPC calls to whatever keys are free in your
+   compositor. For niri, add to `~/.config/niri/dms/binds.kdl` — picking keys that aren't already
+   taken:
+
+   ```kdl
+   // example — choose any free combo
+   Mod+Shift+D { spawn "dms" "ipc" "call" "whisperer" "toggle"; }
+   Mod+Shift+A { spawn "dms" "ipc" "call" "whisperer" "toggleAi"; }
+   ```
+
+   (This is a DMS-managed file — re-add the binds if DMS ever regenerates it.)
+
+Until a working whisper.cpp binary **and** a model are present, the Record button is disabled and
+tells you what's missing — nothing records a clip it can't transcribe. (AI mode only needs an API
+key; local whisper is just its fallback.)
+
+## whisper.cpp binary
+
+whisper.cpp powers **local** transcription. It's not needed for AI dictation, which runs on a cloud
+provider and only needs an API key (local whisper is just its fallback) — so if you only use AI
+mode, you can skip this entirely.
+
+It's an **external dependency** — this plugin doesn't bundle it (no binary, no vendored source).
+You install whisper.cpp on your system and Whisperer finds it: it looks for the CLI on your `PATH`
+under the names `whisper-cli`, `whisper-cpp`, or `whisper.cpp` (and falls back to a configured path
+if it's off `PATH`).
+
+### Install it
+
+**From your package manager** (simplest — pick what your distro ships):
+
+```fish
+# Arch (AUR)
+paru -S whisper.cpp          # or: yay -S whisper.cpp
+# Nix
+nix profile install nixpkgs#openai-whisper-cpp
+# macOS / Linuxbrew
+brew install whisper-cpp
+```
+
+Package binary names vary (`whisper-cli`, `whisper-cpp`); Whisperer checks all of them.
+
+**Or build from upstream** (a local CPU build, tuned to your machine):
+
+```fish
+git clone https://github.com/ggml-org/whisper.cpp
+cmake -S whisper.cpp -B whisper.cpp/build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+ninja -C whisper.cpp/build whisper-cli
+cp whisper.cpp/build/bin/whisper-cli ~/.local/bin/   # ~/.local/bin is on PATH
+```
+
+(`GGML_NATIVE` is left on — since it's your own machine, `-march=native` is exactly what you want.)
+
+## Usage
+
+- **Bar pill**: speaker bars (idle) → red pulsing stop icon + elapsed (recording) → waveform +
+  "…" (transcribing). **Right-click** is a quick toggle for local dictation; **left-click** opens
+  the popout (where the Record / AI buttons live). Left-click is deliberately *not* wired to
+  recording — reflexively left-clicking a status pill to open its popout would start recordings by
+  accident.
+- **IPC** (the primary interface, bind it to any key you like): `dms ipc call whisperer
+  toggle|toggleAi|start|startAi|stop|cancel|status`. `toggle` is local dictation, `toggleAi` is
+  AI-cleanup dictation; running `toggleAi` mid-recording upgrades the current recording to AI mode.
+- **Overlay** (Superwhisper style, bottom- or top-center): live waveform of real mic levels while
+  recording (click it to stop, `Esc` to cancel), bouncing dots while transcribing, transcript
+  preview flash when done.
+- **Popout** (click the pill): **Record** / **AI** buttons to start dictation, last 20 transcripts
+  (click to copy, keyboard icon to re-type at cursor), clear history, open settings.
+
+## Features
+
+- **Pre-flight gate**: recording is blocked until a working local pipeline is present — the
+  whisper.cpp binary and the selected model file. The Record button disables and shows the reason
+  instead of recording a clip that can't be transcribed; it re-checks each time the popout opens,
+  so installing the pieces ungates it without a restart.
+- **AI transcription** (`toggleAi`): the audio itself is sent (base64, in-memory pipe) to an
+  audio-capable model, which transcribes *and* formats in one pass — fillers/false starts removed,
+  self-corrections applied, "new paragraph"-style commands honored — but the model is told never to
+  add breaks on its own, so output stays on one line unless you ask. Custom vocabulary and snippet
+  triggers are injected into the prompt so jargon is spelled right without whisper in the loop.
+  Two providers, selectable in settings:
+  - **OpenRouter** — model dropdown fetched live and filtered to audio-input models (default
+    `google/gemini-3.5-flash`). Requests carry `X-Title: Whisperer` so a shared key shows per-app
+    usage.
+  - **Google (Gemini API)** — free-tier friendly; key from aistudio.google.com/apikey, model
+    dropdown fetched from the account's catalog once a key is set (default `gemini-2.5-flash`).
+
+  On any API failure it falls back to local whisper so the dictation isn't lost. Keys live in the
+  login keyring (via `secret-tool`), never in the settings JSON, and are passed to curl via the
+  environment, never argv.
+- **Custom vocabulary**: add names, jargon, and tricky spellings in settings; they're passed to
+  whisper as an initial prompt (`--prompt` + `--carry-initial-prompt`) to bias decoding. Keep the
+  list to a few dozen entries — the prompt is capped at ~224 tokens and biasing weakens as it grows.
+- **Voice snippets**: define trigger phrase → full text pairs. The expansion is typed when the
+  *entire* dictation matches a trigger (ignoring case/punctuation, in both local and AI mode) —
+  triggers inside longer sentences are left alone. `\n` in the expansion becomes a real line break.
+- **Newline-safe typing**: line breaks (AI formatting, snippet expansions) are sent as Shift+Enter
+  key events, not literal Returns, so they insert a break in chat-style inputs instead of
+  submitting mid-dictation.
+- **Silence gate**: if the recording's peak level is below -40 dB, transcription is skipped
+  entirely (no whisper hallucinations typed into the focused window). Non-speech tokens are also
+  suppressed (`--suppress-nst`) and bracketed annotations scrubbed; output with no real words is
+  dropped.
+- **Remove background music**: strip speaker audio from the recording using PipeWire echo
+  cancellation when available, falling back to pausing media players (playerctl) while recording.
+- **Auto-stop on silence** (off by default): stop on its own after a configurable 1–15 s of
+  silence. It only arms once you've said something, and voice detection is relative to an adaptive
+  noise floor, so mic volume and room noise don't need tuning. Either way there's a 5-minute cap.
+- **Sound cues**: freedesktop chimes on start / done / error (toggleable).
+
+## Repo layout
+
+The repo is *only* the plugin — no bundled binary or vendored source:
+
+```
+dms-whisperer/            ← the plugin (this repo root)
+  plugin.json             ← manifest
+  Whisperer.qml           ← bar widget, state machine, overlay window, popout
+  WhispererSettings.qml   ← settings UI + model manager
+  Sounds/                 ← start/done/error cues
+```
+
+External runtime pieces, installed on the host (not part of this repo):
+
+- `whisper-cli` on `PATH` (e.g. `~/.local/bin/whisper-cli`) — see [whisper.cpp binary](#whispercpp-binary)
+- `~/.local/share/whisperer/models/` — ggml models (`base.en` default), downloaded in-app
+- `~/.config/niri/dms/binds.kdl` — any optional keybinds you add for `toggle` / `toggleAi`
+
+(If you build whisper.cpp locally, keep that checkout *outside* the plugin directory so it never
+ends up in the plugin you distribute.)
 
 ## Debugging
 

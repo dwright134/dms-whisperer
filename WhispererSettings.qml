@@ -174,6 +174,126 @@ PluginSettings {
         }
     }
 
+    // whisper.cpp binary: resolved with `command -v` instead of a free-text
+    // path field, so the user never has to know where it landed. The detected
+    // path is saved to the whisperBin key (the plugin reads it and self-detects
+    // too). Falls back to the stored/default path when it's off PATH but present.
+    // Self-loads like SecretSetting so it works nested inside the tab columns.
+    component WhisperBinSetting: Column {
+        id: binSetting
+
+        required property string settingKey
+        required property string label
+        property string description: ""
+        property string defaultValue: ""
+        property string value: defaultValue
+        property bool detecting: false
+        property bool resolved: false
+
+        width: parent.width
+        spacing: Theme.spacingS
+
+        function findSettings() {
+            let item = parent
+            while (item) {
+                if (item.saveValue !== undefined && item.loadValue !== undefined)
+                    return item
+                item = item.parent
+            }
+            return null
+        }
+
+        function loadValue() {
+            const settings = findSettings()
+            value = settings ? settings.loadValue(settingKey, defaultValue) : defaultValue
+            detect()
+        }
+
+        function detect() {
+            detecting = true
+            Proc.runCommand("whisperer.detectBin",
+                            ["sh", "-c",
+                             "command -v whisper-cli || command -v whisper-cpp || command -v whisper.cpp || " +
+                             "{ [ -x \"$1\" ] && printf '%s\\n' \"$1\"; }",
+                             "sh", binSetting.value],
+                            (out, code) => {
+                                binSetting.detecting = false
+                                const path = (out || "").trim()
+                                binSetting.resolved = (code === 0 && path.length > 0)
+                                if (binSetting.resolved && path !== binSetting.value) {
+                                    binSetting.value = path
+                                    const settings = binSetting.findSettings()
+                                    if (settings)
+                                        settings.saveValue(binSetting.settingKey, path)
+                                }
+                            })
+        }
+
+        Component.onCompleted: Qt.callLater(loadValue)
+
+        StyledText {
+            text: binSetting.label
+            font.pixelSize: Theme.fontSizeMedium
+            font.weight: Font.Medium
+            color: Theme.surfaceText
+        }
+
+        StyledText {
+            text: binSetting.description
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.surfaceVariantText
+            width: parent.width
+            wrapMode: Text.WordWrap
+            visible: binSetting.description !== ""
+        }
+
+        StyledRect {
+            width: parent.width
+            height: Math.max(reDetect.height, statusText.implicitHeight) + Theme.spacingM * 2
+            radius: Theme.cornerRadius
+            color: Theme.surfaceContainerHighest
+
+            DankIcon {
+                id: statusIcon
+                anchors.left: parent.left
+                anchors.leftMargin: Theme.spacingM
+                anchors.verticalCenter: parent.verticalCenter
+                name: binSetting.detecting ? "hourglass_empty"
+                      : (binSetting.resolved ? "check_circle" : "error")
+                size: Theme.iconSize - 4
+                color: binSetting.detecting ? Theme.surfaceVariantText
+                       : (binSetting.resolved ? Theme.primary : Theme.warning)
+            }
+
+            StyledText {
+                id: statusText
+                anchors.left: statusIcon.right
+                anchors.leftMargin: Theme.spacingS
+                anchors.right: reDetect.left
+                anchors.rightMargin: Theme.spacingS
+                anchors.verticalCenter: parent.verticalCenter
+                elide: Text.ElideMiddle
+                text: binSetting.detecting ? "Looking for whisper.cpp…"
+                      : (binSetting.resolved ? binSetting.value
+                         : "whisper.cpp not found on PATH — install it (e.g. whisper-cli)")
+                font.pixelSize: Theme.fontSizeSmall
+                color: binSetting.resolved ? Theme.surfaceText : Theme.surfaceVariantText
+            }
+
+            DankActionButton {
+                id: reDetect
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.spacingS
+                anchors.verticalCenter: parent.verticalCenter
+                iconName: "refresh"
+                tooltipText: "Detect again"
+                buttonSize: 32
+                enabled: !binSetting.detecting
+                onClicked: binSetting.detect()
+            }
+        }
+    }
+
     // Model pickers need more room than SelectionSetting's fixed 200px
     // control, which elides long model names into ambiguity: full-width
     // dropdown, wide popup, fuzzy search over the whole catalog
@@ -578,7 +698,7 @@ PluginSettings {
 
     StyledText {
         width: parent.width
-        text: "Click the mic in the bar, press Mod+Shift+D, or run `dms ipc call whisperer toggle` to dictate. Text is typed at the focused cursor when transcription finishes. Mod+Shift+A dictates via an AI provider instead (configured below)."
+        text: "Right-click the mic in the bar for a quick toggle, left-click it to open the popout and hit Record, or run `dms ipc call whisperer toggle` (bind it to any free key you like), to dictate. Text is typed at the focused cursor when transcription finishes. `dms ipc call whisperer toggleAi` dictates via an AI provider instead (configured below)."
         font.pixelSize: Theme.fontSizeMedium
         color: Theme.surfaceVariantText
         wrapMode: Text.WordWrap
@@ -747,7 +867,7 @@ PluginSettings {
 
         StyledText {
             width: parent.width
-            text: "Dictate with Mod+Shift+A (or `dms ipc call whisperer toggleAi`) and the audio recording is sent straight to an audio-capable model, which transcribes and formats it in one pass — rambling in, clear formatted text out. Your custom vocabulary and snippet triggers are included in the prompt, and snippets expand here too when the whole dictation matches a trigger. Pressing Mod+Shift+A while already recording also finishes with AI transcription. On failure it falls back to local whisper. Configure each provider in its tab, then pick which one is active below."
+            text: "Run `dms ipc call whisperer toggleAi` (bind it to a key of your choice) and the audio recording is sent straight to an audio-capable model, which transcribes and formats it in one pass — rambling in, clear formatted text out. Your custom vocabulary and snippet triggers are included in the prompt, and snippets expand here too when the whole dictation matches a trigger. Triggering AI dictation while already recording also finishes the current recording with AI transcription. On failure it falls back to local whisper. Configure each provider in its tab, then pick which one is active below."
             font.pixelSize: Theme.fontSizeSmall
             color: Theme.surfaceVariantText
             wrapMode: Text.WordWrap
@@ -828,7 +948,7 @@ PluginSettings {
         SelectionSetting {
             settingKey: "aiProvider"
             label: "Active provider"
-            description: "Which provider Mod+Shift+A uses"
+            description: "Which provider AI dictation (toggleAi) uses"
             options: [
                 { label: "OpenRouter", value: "openrouter" },
                 { label: "Google (Gemini API)", value: "google" }
@@ -853,7 +973,7 @@ PluginSettings {
         ToggleSetting {
             settingKey: "autoStopEnabled"
             label: "Auto-stop on silence"
-            description: "Stop dictation automatically after a stretch of silence. Only arms once you've actually said something, so it won't cut off a slow start. When off, recording keeps going until you click the bar pill or hit the keybind again (5 minute cap either way)."
+            description: "Stop dictation automatically after a stretch of silence. Only arms once you've actually said something, so it won't cut off a slow start. When off, recording keeps going until you stop it — click the recording overlay, right-click the pill, hit Stop in the popout, or trigger your keybind again (5 minute cap either way)."
             defaultValue: false
         }
 
@@ -933,11 +1053,10 @@ PluginSettings {
             defaultValue: true
         }
 
-        StringSetting {
+        WhisperBinSetting {
             settingKey: "whisperBin"
-            label: "whisper-cli path"
-            description: "Path to the whisper.cpp CLI binary"
-            placeholder: "~/.local/bin/whisper-cli"
+            label: "whisper.cpp binary"
+            description: "Located automatically on your PATH"
             defaultValue: Quickshell.env("HOME") + "/.local/bin/whisper-cli"
         }
     }
