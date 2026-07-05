@@ -1,6 +1,6 @@
 # Whisperer
 
-Push-to-talk dictation for Linux: records your voice, transcribes it **locally** with whisper.cpp,
+Voice dictation for Linux: records your voice, transcribes it **locally** with whisper.cpp,
 and types the result wherever your cursor is focused (plus copies it to the clipboard). Optional
 cloud AI transcription cleans up and formats in one pass.
 
