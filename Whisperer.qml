@@ -165,8 +165,8 @@ PluginComponent {
     }
 
     // Custom vocabulary is fed to whisper as an initial prompt, which biases
-    // decoding toward these spellings (same approach as Superwhisper).
-    // Snippet triggers are included so they transcribe verbatim and match.
+    // decoding toward these spellings. Snippet triggers are included so they
+    // transcribe verbatim and match.
     readonly property string vocabPrompt: {
         const words = vocabWords()
         return words.length > 0 ? "Glossary: " + words.join(", ") + "." : ""
@@ -1107,7 +1107,7 @@ PluginComponent {
         }
     }
 
-    // ── Bottom-center recording overlay (Superwhisper style) ──────────────
+    // ── Bottom-center recording overlay ───────────────────────────────────
 
     PanelWindow {
         id: overlayWindow
