@@ -24,7 +24,7 @@ PluginComponent {
     // |sample| ceiling for s16 (signed 16-bit) audio, for dBFS conversion
     readonly property int s16PeakMax: 32768
 
-    // idle | recording | stopping | transcribing | polishing | error
+    // idle | recording | stopping | transcribing | polishing | aiError | error
     property string sttState: "idle"
     property int elapsedSeconds: 0
     property string pendingText: ""
@@ -174,10 +174,14 @@ PluginComponent {
 
     // Overlay state
     readonly property bool overlayActive: sttState === "recording" || sttState === "stopping" || sttState === "cancelling" || sttState === "transcribing" || sttState === "polishing"
-    readonly property bool overlayShown: overlayActive || doneLingerTimer.running
+    // "aiError" keeps the overlay up with no linger timer — a sticky prompt that
+    // holds until the user picks local-fallback or cancel.
+    readonly property bool overlayShown: overlayActive || sttState === "aiError" || doneLingerTimer.running
     property bool overlayWindowVisible: false
     property string doneKind: ""   // "ok" | "error"
     property string doneText: ""
+    // Provider failure reason shown in the sticky AI-error prompt
+    property string aiErrorText: ""
 
     onOverlayShownChanged: {
         if (overlayShown) {
@@ -386,7 +390,7 @@ PluginComponent {
     function toggleRecording() {
         if (sttState === "recording")
             stopRecording()
-        else if (sttState === "idle" || sttState === "error")
+        else if (sttState === "idle" || sttState === "error" || sttState === "aiError")
             startRecording(false)
     }
 
@@ -396,7 +400,7 @@ PluginComponent {
         if (sttState === "recording") {
             aiSession = true
             stopRecording()
-        } else if (sttState === "idle" || sttState === "error") {
+        } else if (sttState === "idle" || sttState === "error" || sttState === "aiError") {
             if (activeAiKey.trim().length === 0) {
                 if (typeof ToastService !== "undefined")
                     ToastService.showError("Whisperer: set an API key for the active AI provider in settings")
@@ -533,6 +537,73 @@ PluginComponent {
         // No toast — the overlay flash above already reports this.
     }
 
+    // Distil a provider failure into one human-readable line. Since curl runs
+    // without -f, an HTTP error arrives as a JSON body on stdout (both providers
+    // use { error: { message, code } }); network/timeout errors have no body and
+    // land on stderr instead.
+    function aiErrorReason(out, err, code) {
+        try {
+            const r = JSON.parse(out)
+            if (r && r.error) {
+                const e = r.error
+                let msg = typeof e.message === "string" ? e.message
+                        : typeof e === "string" ? e : ""
+                msg = msg.replace(/\s+/g, " ").trim()
+                if (msg.length > 180)
+                    msg = msg.slice(0, 179) + "…"
+                const status = e.code || e.status || ""
+                return (status ? status + ": " : "") + (msg || "request failed")
+            }
+        } catch (x) {}
+        const se = (err || "").replace(/\s+/g, " ").trim()
+        if (se.length > 0)
+            return se
+        if (code === 28)
+            return "Request timed out"
+        return "Request failed (curl exit " + code + ")"
+    }
+
+    // AI transcription failed. Rather than silently dropping to local whisper,
+    // surface the reason and hold a sticky prompt (no linger timer) until the
+    // user chooses to fall back to local or cancel. Media is already restored by
+    // stopRecording, so there's nothing to un-duck here.
+    function enterAiError(reason) {
+        console.warn("Whisperer: AI transcription failed:", reason)
+        aiErrorText = reason
+        doneKind = ""          // don't let a stale done-flash render behind the prompt
+        sttState = "aiError"
+        playCue("error")
+    }
+
+    // "Use local" from the sticky prompt: the WAV already passed the silence gate
+    // for the AI attempt, so go straight to whisper (no re-gate).
+    function fallbackToLocal() {
+        if (sttState !== "aiError")
+            return
+        if (!localReady) {
+            fail(preflightReason)   // can't fall back — say why instead
+            return
+        }
+        aiSession = false           // it's a local transcription now
+        aiErrorText = ""
+        sttState = "transcribing"
+        transcriber.running = true
+    }
+
+    // "Cancel" from the sticky prompt: discard the take, brief flash, back to idle.
+    function cancelAiError() {
+        if (sttState !== "aiError")
+            return
+        aiSession = false
+        aiErrorText = ""
+        sttState = "idle"
+        doneKind = "error"
+        doneText = "AI cancelled"
+        doneLingerTimer.restart()
+        Proc.runCommand("whisperer.discardRecording",
+                        ["rm", "-f", recordingPath], () => {})
+    }
+
     // True if ch is a cased letter (any script), a digit, or an uncased-script
     // char (CJK etc.). Char-by-char rather than a \p{L}/\p{N} regex because
     // QML's V4 engine silently no-ops those property escapes.
@@ -628,6 +699,7 @@ PluginComponent {
             return "graphic_eq"
         case "polishing":
             return "auto_awesome"
+        case "aiError":
         case "error":
             return "mic_off"
         default:
@@ -643,6 +715,7 @@ PluginComponent {
         case "transcribing":
         case "polishing":
             return Theme.primary
+        case "aiError":
         case "error":
             return Theme.warning
         default:
@@ -660,6 +733,8 @@ PluginComponent {
             return "Transcribing (" + modelName + ")…"
         case "polishing":
             return "Transcribing with AI (" + activeAiModelShort + ")…"
+        case "aiError":
+            return "AI failed — choose local or cancel"
         case "error":
             return doneText.length > 0 ? doneText : "Error"
         default:
@@ -851,7 +926,9 @@ PluginComponent {
             const idx = payload.indexOf(marker)
             return ["sh", "-c",
                     "{ printf %s \"$1\"; base64 -w0 \"$3\"; printf %s \"$2\"; } | " +
-                    "curl -sS -f --max-time 120" +
+                    // No -f: on an HTTP error we want the JSON error body on stdout
+                    // (parsed by aiErrorReason) rather than curl exiting empty.
+                    "curl -sS --max-time 120" +
                     " -H 'Content-Type: application/json'" +
                     authHeader +
                     " -d @- \"$4\"",
@@ -898,14 +975,9 @@ PluginComponent {
                     }
                 } catch (e) {}
             }
-            // Fall back to local whisper so the dictation isn't lost. This is a
-            // recovery, not the final outcome — show it as info so we don't stack
-            // a second error toast if whisper then fails via fail().
-            console.warn("Whisperer: AI transcription failed:", aiErr.text.trim(), aiOut.text.slice(0, 300))
-            if (typeof ToastService !== "undefined")
-                ToastService.showInfo("Whisperer: AI transcription failed — falling back to whisper")
-            root.sttState = "transcribing"
-            transcriber.running = true
+            // Don't silently drop to local — surface the reason and let the user
+            // decide (local fallback or cancel) via the sticky overlay prompt.
+            root.enterAiError(root.aiErrorReason(aiOut.text, aiErr.text, exitCode))
         }
     }
 
@@ -982,13 +1054,13 @@ PluginComponent {
         }
 
         function start(): string {
-            if (root.sttState === "idle" || root.sttState === "error")
+            if (root.sttState === "idle" || root.sttState === "error" || root.sttState === "aiError")
                 root.startRecording(false)
             return root.sttState
         }
 
         function startAi(): string {
-            if (root.sttState === "idle" || root.sttState === "error")
+            if (root.sttState === "idle" || root.sttState === "error" || root.sttState === "aiError")
                 root.toggleAiRecording()
             return root.sttState
         }
@@ -1126,8 +1198,8 @@ PluginComponent {
         anchors.top: root.overlayAtTop
         margins.bottom: root.overlayAtTop ? 0 : 48
         margins.top: root.overlayAtTop ? 48 : 0
-        implicitWidth: 360
-        implicitHeight: 100
+        implicitWidth: root.sttState === "aiError" ? 420 : 360
+        implicitHeight: root.sttState === "aiError" ? 200 : 100
 
         Rectangle {
             id: overlayCard
@@ -1137,12 +1209,12 @@ PluginComponent {
             // Slides toward the nearest screen edge while fading out
             anchors.bottomMargin: root.overlayShown ? 12 : -8
             anchors.topMargin: root.overlayShown ? 12 : -8
-            width: 340
-            height: 72
-            radius: height / 2
+            width: root.sttState === "aiError" ? 400 : 340
+            height: root.sttState === "aiError" ? 156 : 72
+            radius: root.sttState === "aiError" ? 22 : height / 2
             color: Theme.surfaceContainer
             border.width: 1
-            border.color: Qt.alpha(root.sttState === "recording" ? Theme.error : Theme.primary, 0.35)
+            border.color: Qt.alpha(root.sttState === "recording" || root.sttState === "aiError" ? Theme.error : Theme.primary, 0.35)
             opacity: root.overlayShown ? 1 : 0
 
             Behavior on opacity {
@@ -1172,7 +1244,10 @@ PluginComponent {
                 anchors.fill: parent
                 focus: true
                 Keys.onEscapePressed: event => {
-                    root.cancelRecording()
+                    if (root.sttState === "aiError")
+                        root.cancelAiError()
+                    else
+                        root.cancelRecording()
                     event.accepted = true
                 }
                 Connections {
@@ -1297,7 +1372,7 @@ PluginComponent {
             Row {
                 anchors.centerIn: parent
                 spacing: Theme.spacingS
-                visible: !root.overlayActive && root.doneKind.length > 0
+                visible: !root.overlayActive && root.sttState !== "aiError" && root.doneKind.length > 0
 
                 DankIcon {
                     name: root.doneKind === "ok" ? "check_circle" : "error"
@@ -1315,6 +1390,119 @@ PluginComponent {
                     maximumLineCount: 2
                     elide: Text.ElideRight
                     anchors.verticalCenter: parent.verticalCenter
+                }
+            }
+
+            // AI failed: sticky prompt held open (no linger timer) until the user
+            // picks a local fallback or cancels.
+            Column {
+                anchors.centerIn: parent
+                width: parent.width - Theme.spacingXL * 2
+                spacing: Theme.spacingS
+                visible: root.sttState === "aiError"
+
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: Theme.spacingXS
+
+                    DankIcon {
+                        name: "error"
+                        size: Theme.iconSize
+                        color: Theme.error
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    StyledText {
+                        text: "AI transcription failed"
+                        color: Theme.surfaceText
+                        font.pixelSize: Theme.fontSizeMedium
+                        font.weight: Font.Medium
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+
+                StyledText {
+                    width: parent.width
+                    text: root.aiErrorText
+                    color: Theme.surfaceVariantText
+                    font.pixelSize: Theme.fontSizeSmall
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    maximumLineCount: 3
+                    elide: Text.ElideRight
+                }
+
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: Theme.spacingM
+                    topPadding: Theme.spacingXS
+
+                    // Fall back to local whisper (disabled if local isn't ready)
+                    Rectangle {
+                        id: useLocalBtn
+                        width: 122
+                        height: 32
+                        radius: 16
+                        enabled: root.localReady
+                        opacity: enabled ? 1 : 0.4
+                        color: localBtnArea.containsMouse ? Qt.darker(Theme.primary, 1.1) : Theme.primary
+
+                        Row {
+                            anchors.centerIn: parent
+                            spacing: Theme.spacingXS
+
+                            DankIcon {
+                                name: "graphic_eq"
+                                size: Theme.iconSize - 6
+                                color: Theme.onPrimary
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            StyledText {
+                                text: "Use local"
+                                color: Theme.onPrimary
+                                font.pixelSize: Theme.fontSizeSmall
+                                font.weight: Font.Medium
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+
+                        MouseArea {
+                            id: localBtnArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: root.localReady
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.fallbackToLocal()
+                        }
+                    }
+
+                    // Discard the recording
+                    Rectangle {
+                        id: cancelBtn
+                        width: 100
+                        height: 32
+                        radius: 16
+                        color: cancelBtnArea.containsMouse ? Theme.surfaceVariant : "transparent"
+                        border.width: 1
+                        border.color: Theme.outline
+
+                        StyledText {
+                            anchors.centerIn: parent
+                            text: "Cancel"
+                            color: Theme.surfaceText
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.weight: Font.Medium
+                        }
+
+                        MouseArea {
+                            id: cancelBtnArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.cancelAiError()
+                        }
+                    }
                 }
             }
 
