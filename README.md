@@ -1,4 +1,4 @@
-# Penguin Whisperer
+# Whisperer
 
 A minimal Linux take on [Superwhisper](https://superwhisper.com): push-to-talk dictation that
 records your voice, transcribes it **locally** with whisper.cpp, and types the result wherever
@@ -28,7 +28,7 @@ Mod+Shift+D / click mic pill
   preview flash when done.
 - **Popout** (right-click the pill): record/stop button, last 20 transcripts (click to copy,
   keyboard icon to re-type at cursor), clear history, open settings.
-- **Settings → Plugins → Penguin Whisperer**: model manager (download/delete/select tiny.en,
+- **Settings → Plugins → Whisperer**: model manager (download/delete/select tiny.en,
   base.en, small.en, small multilingual, medium.en straight from Hugging Face with progress),
   custom vocabulary, language (en/auto), auto-stop on silence + overlay position,
   type-at-cursor / clipboard / sound-cue toggles, whisper-cli path.
@@ -52,7 +52,7 @@ Mod+Shift+D / click mic pill
   prompt so jargon is spelled right without whisper in the loop. Two providers, configured in
   tabs in settings with an "active provider" selector:
   - **OpenRouter** — model dropdown fetched live from the catalog, filtered to audio-input
-    models (default `google/gemini-3.5-flash`). Requests carry `X-Title: Penguin Whisperer`
+    models (default `google/gemini-3.5-flash`). Requests carry `X-Title: Whisperer`
     so a shared key shows usage per app.
   - **Google (Gemini API)** — free-tier friendly; key from aistudio.google.com/apikey, model
     dropdown fetched from the account's catalog once a key is set (default
@@ -69,7 +69,7 @@ Mod+Shift+D / click mic pill
   words is dropped.
 - **Keybinds**: `Mod+Shift+D` → toggle dictation, `Mod+Shift+A` → toggle AI-cleanup dictation
   (in `~/.config/niri/dms/binds.kdl`).
-- **IPC**: `dms ipc call penguinWhisperer toggle|toggleAi|start|startAi|stop|status`.
+- **IPC**: `dms ipc call whisperer toggle|toggleAi|start|startAi|stop|status`.
 - **Auto-stop on silence** (off by default): when enabled, dictation stops on its own after a
   configurable 1–15 s of silence. It only arms once you've actually said something, and voice
   detection is relative to an adaptive noise floor, so mic volume and room noise don't need
@@ -78,16 +78,16 @@ Mod+Shift+D / click mic pill
 
 ## Layout
 
-- `PenguinWhisperer/` — the DMS plugin (symlinked into `~/.config/DankMaterialShell/plugins/`)
+- `Whisperer/` — the DMS plugin (symlinked into `~/.config/DankMaterialShell/plugins/`)
   - `plugin.json` — manifest
-  - `PenguinWhisperer.qml` — bar widget, state machine, overlay window, popout
-  - `PenguinWhispererSettings.qml` — settings UI + model manager
+  - `Whisperer.qml` — bar widget, state machine, overlay window, popout
+  - `WhispererSettings.qml` — settings UI + model manager
 - `vendor/whisper.cpp/` — whisper.cpp source + build (not tracked in git)
 
 ## Installed pieces
 
 - `~/.local/bin/whisper-cli` — CPU build of whisper.cpp (AVX2/FMA)
-- `~/.local/share/penguin-whisperer/models/` — ggml models (base.en default, tiny.en fast)
+- `~/.local/share/whisperer/models/` — ggml models (base.en default, tiny.en fast)
 - `~/.config/niri/dms/binds.kdl` — holds the Mod+Shift+D bind (note: DMS-managed file;
   re-add the bind if DMS ever regenerates it)
 
@@ -104,6 +104,6 @@ cp vendor/whisper.cpp/build/bin/whisper-cli ~/.local/bin/
 
 ```fish
 qs list --all                      # find the shell instance
-qs log -i <instance-id> | grep -i penguin
-dms ipc call penguinWhisperer status
+qs log -i <instance-id> | grep -i whisperer
+dms ipc call whisperer status
 ```

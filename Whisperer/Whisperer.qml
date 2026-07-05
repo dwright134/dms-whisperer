@@ -10,11 +10,11 @@ import qs.Modules.Plugins
 PluginComponent {
     id: root
 
-    readonly property string whispererId: "penguinWhisperer"
+    readonly property string whispererId: "whisperer"
     readonly property string home: Quickshell.env("HOME")
-    readonly property string recordingPath: "/tmp/penguin-whisperer-recording.wav"
+    readonly property string recordingPath: "/tmp/whisperer-recording.wav"
     // Records which media players we paused (duck fallback) so we resume only those
-    readonly property string duckMarkerPath: "/tmp/penguin-whisperer-ducked"
+    readonly property string duckMarkerPath: "/tmp/whisperer-ducked"
     readonly property int maxRecordSeconds: 300
     // whisper-cli CPU threads (-t)
     readonly property int transcribeThreads: 4
@@ -35,7 +35,7 @@ PluginComponent {
 
     // Settings (persisted via PluginService)
     property string whisperBin: home + "/.local/bin/whisper-cli"
-    property string modelPath: home + "/.local/share/penguin-whisperer/models/ggml-base.en.bin"
+    property string modelPath: home + "/.local/share/whisperer/models/ggml-base.en.bin"
     property string language: "en"
     property bool typeText: true
     property bool copyText: true
@@ -64,7 +64,7 @@ PluginComponent {
     // The echo-cancel virtual source is confirmed present and ready to record from
     property bool aecReady: false
     // Named virtual source exposed by the echo-cancel module
-    readonly property string aecSourceName: "penguin-whisperer-aec"
+    readonly property string aecSourceName: "whisperer-aec"
     // True only when we should actually capture through the cleaned source. Any
     // failure to load/confirm it leaves this false, so recording falls back to
     // the default mic — never worse than before the feature existed.
@@ -128,7 +128,7 @@ PluginComponent {
 
     function loadSettings() {
         whisperBin = PluginService.loadPluginData(whispererId, "whisperBin", home + "/.local/bin/whisper-cli")
-        modelPath = PluginService.loadPluginData(whispererId, "modelPath", home + "/.local/share/penguin-whisperer/models/ggml-base.en.bin")
+        modelPath = PluginService.loadPluginData(whispererId, "modelPath", home + "/.local/share/whisperer/models/ggml-base.en.bin")
         language = PluginService.loadPluginData(whispererId, "language", "en")
         typeText = PluginService.loadPluginData(whispererId, "typeText", true)
         copyText = PluginService.loadPluginData(whispererId, "copyText", true)
@@ -151,12 +151,12 @@ PluginComponent {
     // API keys live in the login keyring (gnome-keyring, via secret-tool), never
     // in the plugin settings JSON — that file is world-readable and is often
     // synced into a dotfiles repo. Only a boolean "<key>Set" flag is persisted.
-    readonly property string keyringService: "penguin-whisperer"
+    readonly property string keyringService: "whisperer"
 
     // Look a key up from the keyring; if it isn't there but an older build left
     // a plaintext copy in the JSON, migrate that copy into the keyring once.
     function loadApiKey(attr, apply) {
-        Proc.runCommand("penguinWhisperer.key.load." + attr,
+        Proc.runCommand("whisperer.key.load." + attr,
                         ["secret-tool", "lookup", "service", keyringService, "key", attr],
                         (out, code) => {
                             let key = code === 0 ? out.replace(/\n+$/, "") : ""
@@ -178,7 +178,7 @@ PluginComponent {
         const p = Qt.createQmlObject('import Quickshell.Io; Process { running: false }', root)
         p.environment = ({ "PW_SECRET": key })
         p.command = ["sh", "-c",
-                     "printf %s \"$PW_SECRET\" | secret-tool store --label=\"Penguin Whisperer API key\" service \"$1\" key \"$2\"",
+                     "printf %s \"$PW_SECRET\" | secret-tool store --label=\"Whisperer API key\" service \"$1\" key \"$2\"",
                      "sh", keyringService, attr]
         p.exited.connect(code => {
             if (code === 0) {
@@ -228,7 +228,7 @@ PluginComponent {
             aecModule.running = false
             return
         }
-        Proc.runCommand("penguinWhisperer.aec.detect",
+        Proc.runCommand("whisperer.aec.detect",
             ["sh", "-c",
              "pw-cli info 0 >/dev/null 2>&1 || { echo none; exit 0; }; " +
              "for d in /usr/lib/pipewire-0.3 /usr/lib64/pipewire-0.3 /usr/lib/*/pipewire-0.3; do " +
@@ -253,7 +253,7 @@ PluginComponent {
     function aecModuleArgs() {
         return '{ monitor.mode = true '
              + 'source.props = { node.name = "' + aecSourceName + '" '
-             + 'node.description = "Penguin Whisperer (echo-cancelled mic)" '
+             + 'node.description = "Whisperer (echo-cancelled mic)" '
              + 'node.virtual = true } '
              + 'capture.props = { node.passive = true } }'
     }
@@ -265,7 +265,7 @@ PluginComponent {
     function ensureAecModule() {
         if (!cancelBackgroundMusic || aecTier !== "aec")
             return
-        Proc.runCommand("penguinWhisperer.aec.check",
+        Proc.runCommand("whisperer.aec.check",
             ["sh", "-c",
              "pw-cli ls Node 2>/dev/null | grep -q 'node.name = \"" + aecSourceName + "\"'"],
             (out, code) => {
@@ -334,7 +334,7 @@ PluginComponent {
         } else if (sttState === "idle" || sttState === "error") {
             if (activeAiKey.trim().length === 0) {
                 if (typeof ToastService !== "undefined")
-                    ToastService.showError("Penguin Whisperer: set an API key for the active AI provider in settings")
+                    ToastService.showError("Whisperer: set an API key for the active AI provider in settings")
                 startRecording(false)
             } else {
                 startRecording(true)
@@ -420,20 +420,20 @@ PluginComponent {
         doneLingerTimer.restart()
         playCue("error")
         // Discard the partial WAV so it can never be picked up by a later run
-        Proc.runCommand("penguinWhisperer.discardRecording",
+        Proc.runCommand("whisperer.discardRecording",
                         ["rm", "-f", recordingPath], () => {})
     }
 
     function fail(message) {
         restoreMedia()   // never leave media paused because a recording errored out
-        console.warn("PenguinWhisperer:", message)
+        console.warn("Whisperer:", message)
         sttState = "error"
         doneKind = "error"
         doneText = message
         doneLingerTimer.restart()
         playCue("error")
         if (typeof ToastService !== "undefined")
-            ToastService.showError("Penguin Whisperer: " + message)
+            ToastService.showError("Whisperer: " + message)
         errorResetTimer.restart()
     }
 
@@ -457,7 +457,7 @@ PluginComponent {
         doneText = "No speech detected"
         doneLingerTimer.restart()
         if (typeof ToastService !== "undefined")
-            ToastService.showInfo("Penguin Whisperer: no speech detected")
+            ToastService.showInfo("Whisperer: no speech detected")
     }
 
     // True if ch is a cased letter (any script), a digit, or an uncased-script
@@ -773,7 +773,7 @@ PluginComponent {
                 url = "https://openrouter.ai/api/v1/chat/completions"
                 // X-Title: OpenRouter app attribution, usage shows per app name
                 authHeader = " -H \"Authorization: Bearer $AI_API_KEY\""
-                           + " -H 'X-Title: Penguin Whisperer'"
+                           + " -H 'X-Title: Whisperer'"
             }
             const idx = payload.indexOf(marker)
             return ["sh", "-c",
@@ -782,7 +782,7 @@ PluginComponent {
                     " -H 'Content-Type: application/json'" +
                     authHeader +
                     " -d @- \"$4\"",
-                    "penguin-whisperer",
+                    "whisperer",
                     payload.slice(0, idx), payload.slice(idx + marker.length),
                     root.recordingPath, url]
         }
@@ -828,9 +828,9 @@ PluginComponent {
             // Fall back to local whisper so the dictation isn't lost. This is a
             // recovery, not the final outcome — show it as info so we don't stack
             // a second error toast if whisper then fails via fail().
-            console.warn("PenguinWhisperer: AI transcription failed:", aiErr.text.trim(), aiOut.text.slice(0, 300))
+            console.warn("Whisperer: AI transcription failed:", aiErr.text.trim(), aiOut.text.slice(0, 300))
             if (typeof ToastService !== "undefined")
-                ToastService.showInfo("Penguin Whisperer: AI transcription failed — falling back to whisper")
+                ToastService.showInfo("Whisperer: AI transcription failed — falling back to whisper")
             root.sttState = "transcribing"
             transcriber.running = true
         }
@@ -853,7 +853,7 @@ PluginComponent {
                   '[ "$first" -eq 0 ] && wtype -M shift -k Return -m shift; ' +
                   '[ -n "$line" ] && printf %s "$line" | wtype -; ' +
                   'first=0; done; }',
-                  "penguin-whisperer", root.pendingText]
+                  "whisperer", root.pendingText]
         onExited: exitCode => {
             if (exitCode !== 0)
                 root.fail("wtype failed (code " + exitCode + ")")
@@ -896,7 +896,7 @@ PluginComponent {
     }
 
     IpcHandler {
-        target: "penguinWhisperer"
+        target: "whisperer"
 
         function toggle(): string {
             root.toggleRecording()
@@ -1043,7 +1043,7 @@ PluginComponent {
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.namespace: "quickshell:penguinWhispererOverlay"
+        WlrLayershell.namespace: "quickshell:whispererOverlay"
         // Grab the keyboard only while recording so Escape can cancel; focus is
         // released the moment recording stops, well before the transcript is
         // typed, so wtype still lands in the user's window.
@@ -1267,7 +1267,7 @@ PluginComponent {
     popoutContent: Component {
         PopoutComponent {
             id: popoutRoot
-            headerText: "Penguin Whisperer"
+            headerText: "Whisperer"
             detailsText: "Local dictation · " + root.modelName + " · Mod+Shift+D / Mod+Shift+A (AI)"
             showCloseButton: true
 

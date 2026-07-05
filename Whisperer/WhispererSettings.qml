@@ -8,10 +8,10 @@ import qs.Modules.Plugins
 
 PluginSettings {
     id: settingsRoot
-    pluginId: "penguinWhisperer"
+    pluginId: "whisperer"
 
     readonly property string home: Quickshell.env("HOME")
-    readonly property string modelsDir: home + "/.local/share/penguin-whisperer/models"
+    readonly property string modelsDir: home + "/.local/share/whisperer/models"
     readonly property string hfBase: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
 
     readonly property var catalog: [
@@ -89,8 +89,8 @@ PluginSettings {
         // The real value is loaded back masked so the bullet count reflects the
         // stored key and blanking the field still clears it.
         function loadValue() {
-            Proc.runCommand("penguinWhisperer.key.show." + settingKey,
-                            ["secret-tool", "lookup", "service", "penguin-whisperer", "key", settingKey],
+            Proc.runCommand("whisperer.key.show." + settingKey,
+                            ["secret-tool", "lookup", "service", "whisperer", "key", settingKey],
                             (out, code) => {
                                 if (textField.activeFocus && isInitialized)
                                     return
@@ -123,8 +123,8 @@ PluginSettings {
                 const p = Qt.createQmlObject('import Quickshell.Io; Process { running: false }', secret)
                 p.environment = ({ "PW_SECRET": value })
                 p.command = ["sh", "-c",
-                             "printf %s \"$PW_SECRET\" | secret-tool store --label=\"Penguin Whisperer API key\" service \"$1\" key \"$2\"",
-                             "sh", "penguin-whisperer", settingKey]
+                             "printf %s \"$PW_SECRET\" | secret-tool store --label=\"Whisperer API key\" service \"$1\" key \"$2\"",
+                             "sh", "whisperer", settingKey]
                 p.exited.connect(code => {
                     if (code === 0 && settings) {
                         settings.saveValue(settingKey, "")
@@ -135,8 +135,8 @@ PluginSettings {
                 p.running = true
             } else {
                 // Cleared: drop it from the keyring and record "not set".
-                Proc.runCommand("penguinWhisperer.key.clear." + settingKey,
-                                ["secret-tool", "clear", "service", "penguin-whisperer", "key", settingKey],
+                Proc.runCommand("whisperer.key.clear." + settingKey,
+                                ["secret-tool", "clear", "service", "whisperer", "key", settingKey],
                                 (out, code) => {})
                 if (settings) {
                     settings.saveValue(settingKey, "")
@@ -306,7 +306,7 @@ PluginSettings {
     }
 
     function fetchAiModels() {
-        Proc.runCommand("penguinWhisperer.aiModels",
+        Proc.runCommand("whisperer.aiModels",
                         ["curl", "-sS", "--max-time", "20", "https://openrouter.ai/api/v1/models"],
                         (out, code) => {
                             if (code !== 0)
@@ -324,7 +324,7 @@ PluginSettings {
                                     aiModelsLive = true
                                 }
                             } catch (e) {
-                                console.warn("PenguinWhisperer: failed to parse OpenRouter model list:", e)
+                                console.warn("Whisperer: failed to parse OpenRouter model list:", e)
                             }
                         },
                         50, 25000)
@@ -366,7 +366,7 @@ PluginSettings {
 
     function refresh() {
         activeModelPath = PluginService.loadPluginData(pluginId, "modelPath", modelFullPath("base.en"))
-        Proc.runCommand("penguinWhisperer.scanModels",
+        Proc.runCommand("whisperer.scanModels",
                         ["sh", "-c", "ls '" + modelsDir + "' 2>/dev/null; true"],
                         (out, code) => {
                             const files = out.trim().split("\n").filter(f => f.length > 0)
@@ -393,7 +393,7 @@ PluginSettings {
         downloadPercent = updated
 
         const path = modelFullPath(model.name)
-        Proc.runCommand("penguinWhisperer.download." + model.name,
+        Proc.runCommand("whisperer.download." + model.name,
                         ["sh", "-c",
                          // Reject a truncated/garbage download (e.g. a 200 that
                          // returns an error page) before it lands as a real model
@@ -414,7 +414,7 @@ PluginSettings {
                                 if (typeof ToastService !== "undefined")
                                     ToastService.showInfo(model.name + " downloaded")
                             } else if (!wasCancelled) {
-                                Proc.runCommand("penguinWhisperer.cleanupPart." + model.name,
+                                Proc.runCommand("whisperer.cleanupPart." + model.name,
                                                 ["rm", "-f", path + ".part"], () => {})
                                 if (typeof ToastService !== "undefined")
                                     ToastService.showError(code === 3
@@ -430,7 +430,7 @@ PluginSettings {
         const c = Object.assign({}, cancelling)
         c[model.name] = true
         cancelling = c
-        Proc.runCommand("penguinWhisperer.cancel." + model.name,
+        Proc.runCommand("whisperer.cancel." + model.name,
                         ["sh", "-c", "pkill -f '" + downloadProbe(model.name) + "'; rm -f '" + modelFullPath(model.name) + ".part'"],
                         (out, code) => {
                             const done = Object.assign({}, downloadPercent)
@@ -446,7 +446,7 @@ PluginSettings {
                 ToastService.showError("Select a different model before deleting the active one")
             return
         }
-        Proc.runCommand("penguinWhisperer.delete." + model.name,
+        Proc.runCommand("whisperer.delete." + model.name,
                         ["rm", "-f", modelFullPath(model.name)],
                         () => refresh())
     }
@@ -487,7 +487,7 @@ PluginSettings {
                     settingsRoot.googleModelsLive = true
                 }
             } catch (e) {
-                console.warn("PenguinWhisperer: failed to parse Gemini model list:", e)
+                console.warn("Whisperer: failed to parse Gemini model list:", e)
             }
         }
     }
@@ -495,8 +495,8 @@ PluginSettings {
     function fetchGoogleModels() {
         if (googleModelFetch.running)
             return
-        Proc.runCommand("penguinWhisperer.key.googleFetch",
-                        ["secret-tool", "lookup", "service", "penguin-whisperer", "key", "googleApiKey"],
+        Proc.runCommand("whisperer.key.googleFetch",
+                        ["secret-tool", "lookup", "service", "whisperer", "key", "googleApiKey"],
                         (out, code) => {
                             let key = code === 0 ? out.replace(/\n+$/, "") : ""
                             if (key.length === 0)
@@ -541,7 +541,7 @@ PluginSettings {
                     continue
                 }
                 const partPath = settingsRoot.modelFullPath(name) + ".part"
-                Proc.runCommand("penguinWhisperer.progress." + name,
+                Proc.runCommand("whisperer.progress." + name,
                                 ["sh", "-c",
                                  "stat -c %s '" + partPath + "' 2>/dev/null || echo 0; " +
                                  "pgrep -fc '" + settingsRoot.downloadProbe(name) + "' 2>/dev/null || echo 0"],
@@ -558,7 +558,7 @@ PluginSettings {
                                         const done = Object.assign({}, settingsRoot.downloadPercent)
                                         delete done[name]
                                         settingsRoot.downloadPercent = done
-                                        Proc.runCommand("penguinWhisperer.orphan." + name,
+                                        Proc.runCommand("whisperer.orphan." + name,
                                                         ["sh", "-c",
                                                          "rm -f '" + partPath + "'; test -f '" + settingsRoot.modelFullPath(name) + "' && echo ok || echo gone"],
                                                         (res, rc) => {
@@ -578,7 +578,7 @@ PluginSettings {
 
     StyledText {
         width: parent.width
-        text: "Click the mic in the bar, press Mod+Shift+D, or run `dms ipc call penguinWhisperer toggle` to dictate. Text is typed at the focused cursor when transcription finishes. Mod+Shift+A dictates via an AI provider instead (configured below)."
+        text: "Click the mic in the bar, press Mod+Shift+D, or run `dms ipc call whisperer toggle` to dictate. Text is typed at the focused cursor when transcription finishes. Mod+Shift+A dictates via an AI provider instead (configured below)."
         font.pixelSize: Theme.fontSizeMedium
         color: Theme.surfaceVariantText
         wrapMode: Text.WordWrap
@@ -747,7 +747,7 @@ PluginSettings {
 
         StyledText {
             width: parent.width
-            text: "Dictate with Mod+Shift+A (or `dms ipc call penguinWhisperer toggleAi`) and the audio recording is sent straight to an audio-capable model, which transcribes and formats it in one pass — rambling in, clear formatted text out. Your custom vocabulary and snippet triggers are included in the prompt, and snippets expand here too when the whole dictation matches a trigger. Pressing Mod+Shift+A while already recording also finishes with AI transcription. On failure it falls back to local whisper. Configure each provider in its tab, then pick which one is active below."
+            text: "Dictate with Mod+Shift+A (or `dms ipc call whisperer toggleAi`) and the audio recording is sent straight to an audio-capable model, which transcribes and formats it in one pass — rambling in, clear formatted text out. Your custom vocabulary and snippet triggers are included in the prompt, and snippets expand here too when the whole dictation matches a trigger. Pressing Mod+Shift+A while already recording also finishes with AI transcription. On failure it falls back to local whisper. Configure each provider in its tab, then pick which one is active below."
             font.pixelSize: Theme.fontSizeSmall
             color: Theme.surfaceVariantText
             wrapMode: Text.WordWrap
