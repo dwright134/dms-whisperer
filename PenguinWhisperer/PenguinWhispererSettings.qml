@@ -240,6 +240,71 @@ PluginSettings {
         }
     }
 
+    // Groups a section's settings into a titled card so the page reads as
+    // distinct panels instead of one long undivided list. Children are laid
+    // out in an inner column.
+    //
+    // PluginSettings reloads persisted values by calling loadValue() on each of
+    // its DIRECT children whenever pluginService appears or plugin data changes.
+    // Nesting settings inside a card makes them grandchildren, so we forward
+    // that call down: without this, components that only self-load in their own
+    // Component.onCompleted (SelectionSetting, ListSettingWithInput) can miss
+    // the load — pluginService isn't always ready that early — and then persist
+    // their default over the stored value on the next edit.
+    component Card: StyledRect {
+        id: card
+
+        property string title: ""
+        default property alias content: cardContent.children
+
+        function loadValue() {
+            _cascadeLoad(cardContent)
+        }
+
+        function _cascadeLoad(item) {
+            const kids = item.children
+            for (let i = 0; i < kids.length; i++) {
+                const c = kids[i]
+                if (!c)
+                    continue
+                if (c.loadValue !== undefined)
+                    c.loadValue()
+                else if (c.children !== undefined)
+                    _cascadeLoad(c)
+            }
+        }
+
+        width: parent.width
+        height: cardColumn.implicitHeight + Theme.spacingL * 2
+        radius: Theme.cornerRadius
+        color: Theme.surfaceContainerHigh
+        border.width: 0
+
+        Column {
+            id: cardColumn
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.margins: Theme.spacingL
+            spacing: Theme.spacingM
+
+            StyledText {
+                width: parent.width
+                text: card.title
+                font.pixelSize: Theme.fontSizeLarge
+                font.weight: Font.Bold
+                color: Theme.surfaceText
+                visible: card.title !== ""
+            }
+
+            Column {
+                id: cardContent
+                width: parent.width
+                spacing: Theme.spacingM
+            }
+        }
+    }
+
     function fetchAiModels() {
         Proc.runCommand("penguinWhisperer.aiModels",
                         ["curl", "-sS", "--max-time", "20", "https://openrouter.ai/api/v1/models"],
@@ -521,141 +586,137 @@ PluginSettings {
 
     // ── Model manager ──────────────────────────────────────────────────────
 
-    StyledText {
-        width: parent.width
-        text: "Models"
-        font.pixelSize: Theme.fontSizeLarge
-        font.weight: Font.Bold
-        color: Theme.surfaceText
-    }
+    Card {
+        title: "Models"
 
-    Column {
-        width: parent.width
-        spacing: Theme.spacingS
+        Column {
+            width: parent.width
+            spacing: Theme.spacingS
 
-        Repeater {
-            model: settingsRoot.catalog
+            Repeater {
+                model: settingsRoot.catalog
 
-            Rectangle {
-                id: modelRow
-                required property var modelData
-
-                readonly property bool installed: settingsRoot.isInstalled(modelData.name)
-                readonly property bool downloading: settingsRoot.isDownloading(modelData.name)
-                readonly property bool active: settingsRoot.modelFullPath(modelData.name) === settingsRoot.activeModelPath
-                readonly property int percent: settingsRoot.shownPercent(modelData.name)
-
-                width: parent.width
-                height: downloading ? 74 : 60
-                radius: Theme.cornerRadius
-                color: active ? Qt.alpha(Theme.primary, 0.12) : Theme.surfaceContainerHigh
-                border.width: active ? 1 : 0
-                border.color: Qt.alpha(Theme.primary, 0.5)
-
-                Behavior on height {
-                    NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
-                }
-
-                Row {
-                    anchors.left: parent.left
-                    anchors.leftMargin: Theme.spacingM
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.verticalCenterOffset: modelRow.downloading ? -7 : 0
-                    spacing: Theme.spacingM
-
-                    DankIcon {
-                        name: modelRow.downloading ? "downloading" : (modelRow.active ? "radio_button_checked" : (modelRow.installed ? "radio_button_unchecked" : "cloud_download"))
-                        size: Theme.iconSize
-                        color: (modelRow.active || modelRow.downloading) ? Theme.primary : Theme.surfaceVariantText
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-
-                    Column {
-                        spacing: 2
-                        anchors.verticalCenter: parent.verticalCenter
-
-                        StyledText {
-                            text: modelRow.modelData.name + "  ·  " + modelRow.modelData.mb + " MB"
-                            font.pixelSize: Theme.fontSizeMedium
-                            font.weight: modelRow.active ? Font.Medium : Font.Normal
-                            color: Theme.surfaceText
-                        }
-
-                        StyledText {
-                            text: modelRow.downloading
-                                  ? "Downloading… " + modelRow.percent + "% of " + modelRow.modelData.mb + " MB"
-                                  : modelRow.modelData.desc
-                            font.pixelSize: Theme.fontSizeSmall
-                            color: modelRow.downloading ? Theme.primary : Theme.surfaceVariantText
-                        }
-                    }
-                }
-
-                // Download progress bar
                 Rectangle {
-                    visible: modelRow.downloading
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.bottom: parent.bottom
-                    anchors.leftMargin: Theme.spacingM
-                    anchors.rightMargin: Theme.spacingM
-                    anchors.bottomMargin: 8
-                    height: 5
-                    radius: 2.5
-                    color: Qt.alpha(Theme.primary, 0.2)
+                    id: modelRow
+                    required property var modelData
 
-                    Rectangle {
-                        width: parent.width * modelRow.percent / 100
-                        height: parent.height
-                        radius: parent.radius
-                        color: Theme.primary
+                    readonly property bool installed: settingsRoot.isInstalled(modelData.name)
+                    readonly property bool downloading: settingsRoot.isDownloading(modelData.name)
+                    readonly property bool active: settingsRoot.modelFullPath(modelData.name) === settingsRoot.activeModelPath
+                    readonly property int percent: settingsRoot.shownPercent(modelData.name)
 
-                        Behavior on width {
-                            NumberAnimation { duration: 400; easing.type: Easing.OutQuad }
+                    width: parent.width
+                    height: downloading ? 74 : 60
+                    radius: Theme.cornerRadius
+                    color: active ? Qt.alpha(Theme.primary, 0.12) : Theme.surfaceContainerHigh
+                    border.width: active ? 1 : 0
+                    border.color: Qt.alpha(Theme.primary, 0.5)
+
+                    Behavior on height {
+                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                    }
+
+                    Row {
+                        anchors.left: parent.left
+                        anchors.leftMargin: Theme.spacingM
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenterOffset: modelRow.downloading ? -7 : 0
+                        spacing: Theme.spacingM
+
+                        DankIcon {
+                            name: modelRow.downloading ? "downloading" : (modelRow.active ? "radio_button_checked" : (modelRow.installed ? "radio_button_unchecked" : "cloud_download"))
+                            size: Theme.iconSize
+                            color: (modelRow.active || modelRow.downloading) ? Theme.primary : Theme.surfaceVariantText
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        Column {
+                            spacing: 2
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            StyledText {
+                                text: modelRow.modelData.name + "  ·  " + modelRow.modelData.mb + " MB"
+                                font.pixelSize: Theme.fontSizeMedium
+                                font.weight: modelRow.active ? Font.Medium : Font.Normal
+                                color: Theme.surfaceText
+                            }
+
+                            StyledText {
+                                text: modelRow.downloading
+                                      ? "Downloading… " + modelRow.percent + "% of " + modelRow.modelData.mb + " MB"
+                                      : modelRow.modelData.desc
+                                font.pixelSize: Theme.fontSizeSmall
+                                color: modelRow.downloading ? Theme.primary : Theme.surfaceVariantText
+                            }
                         }
                     }
-                }
 
-                MouseArea {
-                    anchors.fill: parent
-                    enabled: modelRow.installed && !modelRow.active
-                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                    onClicked: settingsRoot.selectModel(modelRow.modelData)
-                }
-
-                Row {
-                    anchors.right: parent.right
-                    anchors.rightMargin: Theme.spacingS
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.verticalCenterOffset: modelRow.downloading ? -7 : 0
-                    spacing: Theme.spacingXS
-
-                    DankActionButton {
-                        visible: !modelRow.installed && !modelRow.downloading
-                        iconName: "download"
-                        tooltipText: "Download"
-                        buttonSize: 34
-                        anchors.verticalCenter: parent.verticalCenter
-                        onClicked: settingsRoot.downloadModel(modelRow.modelData)
-                    }
-
-                    DankActionButton {
+                    // Download progress bar
+                    Rectangle {
                         visible: modelRow.downloading
-                        iconName: "close"
-                        tooltipText: "Cancel download"
-                        buttonSize: 34
-                        anchors.verticalCenter: parent.verticalCenter
-                        onClicked: settingsRoot.cancelDownload(modelRow.modelData)
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        anchors.leftMargin: Theme.spacingM
+                        anchors.rightMargin: Theme.spacingM
+                        anchors.bottomMargin: 8
+                        height: 5
+                        radius: 2.5
+                        color: Qt.alpha(Theme.primary, 0.2)
+
+                        Rectangle {
+                            width: parent.width * modelRow.percent / 100
+                            height: parent.height
+                            radius: parent.radius
+                            color: Theme.primary
+
+                            Behavior on width {
+                                NumberAnimation { duration: 400; easing.type: Easing.OutQuad }
+                            }
+                        }
                     }
 
-                    DankActionButton {
-                        visible: modelRow.installed && !modelRow.active
-                        iconName: "delete"
-                        tooltipText: "Delete model file"
-                        iconColor: Theme.error
-                        buttonSize: 34
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: modelRow.installed && !modelRow.active
+                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: settingsRoot.selectModel(modelRow.modelData)
+                    }
+
+                    Row {
+                        anchors.right: parent.right
+                        anchors.rightMargin: Theme.spacingS
                         anchors.verticalCenter: parent.verticalCenter
-                        onClicked: settingsRoot.deleteModel(modelRow.modelData)
+                        anchors.verticalCenterOffset: modelRow.downloading ? -7 : 0
+                        spacing: Theme.spacingXS
+
+                        DankActionButton {
+                            visible: !modelRow.installed && !modelRow.downloading
+                            iconName: "download"
+                            tooltipText: "Download"
+                            buttonSize: 34
+                            anchors.verticalCenter: parent.verticalCenter
+                            onClicked: settingsRoot.downloadModel(modelRow.modelData)
+                        }
+
+                        DankActionButton {
+                            visible: modelRow.downloading
+                            iconName: "close"
+                            tooltipText: "Cancel download"
+                            buttonSize: 34
+                            anchors.verticalCenter: parent.verticalCenter
+                            onClicked: settingsRoot.cancelDownload(modelRow.modelData)
+                        }
+
+                        DankActionButton {
+                            visible: modelRow.installed && !modelRow.active
+                            iconName: "delete"
+                            tooltipText: "Delete model file"
+                            iconColor: Theme.error
+                            buttonSize: 34
+                            anchors.verticalCenter: parent.verticalCenter
+                            onClicked: settingsRoot.deleteModel(modelRow.modelData)
+                        }
                     }
                 }
             }
@@ -664,213 +725,220 @@ PluginSettings {
 
     // ── Snippets ───────────────────────────────────────────────────────────
 
-    StyledText {
-        width: parent.width
-        text: "Snippets"
-        font.pixelSize: Theme.fontSizeLarge
-        font.weight: Font.Bold
-        color: Theme.surfaceText
-    }
+    Card {
+        title: "Snippets"
 
-    ListSettingWithInput {
-        settingKey: "snippets"
-        label: "Voice snippets"
-        description: "Speak a trigger phrase on its own and the full text is typed instead of the transcript. Only applies to local (whisper) dictation; the whole dictation must match the trigger, ignoring case and punctuation. Use \\n in the text for a line break."
-        defaultValue: []
-        fields: [
-            {id: "trigger", label: "Trigger phrase", placeholder: "sign off", width: 160, required: true},
-            {id: "text", label: "Text to type", placeholder: "Best regards,\\nDaniel", width: 300, required: true}
-        ]
+        ListSettingWithInput {
+            settingKey: "snippets"
+            label: "Voice snippets"
+            description: "Speak a trigger phrase on its own and the full text is typed instead of the transcript. Only applies to local (whisper) dictation; the whole dictation must match the trigger, ignoring case and punctuation. Use \\n in the text for a line break."
+            defaultValue: []
+            fields: [
+                {id: "trigger", label: "Trigger phrase", placeholder: "sign off", width: 160, required: true},
+                {id: "text", label: "Text to type", placeholder: "Best regards,\\nDaniel", width: 300, required: true}
+            ]
+        }
     }
 
     // ── AI cleanup ─────────────────────────────────────────────────────────
 
-    StyledText {
-        width: parent.width
-        text: "AI cleanup"
-        font.pixelSize: Theme.fontSizeLarge
-        font.weight: Font.Bold
-        color: Theme.surfaceText
-    }
+    Card {
+        title: "AI cleanup"
 
-    StyledText {
-        width: parent.width
-        text: "Dictate with Mod+Shift+A (or `dms ipc call penguinWhisperer toggleAi`) and the audio recording is sent straight to an audio-capable model, which transcribes and formats it in one pass — rambling in, clear formatted text out. Your custom vocabulary and snippet triggers are included in the prompt, and snippets expand here too when the whole dictation matches a trigger. Pressing Mod+Shift+A while already recording also finishes with AI transcription. On failure it falls back to local whisper. Configure each provider in its tab, then pick which one is active below."
-        font.pixelSize: Theme.fontSizeSmall
-        color: Theme.surfaceVariantText
-        wrapMode: Text.WordWrap
-    }
-
-    DankTabBar {
-        id: providerTabs
-        width: Math.min(320, parent.width)
-        height: 45
-        model: [
-            { text: "OpenRouter", icon: "hub" },
-            { text: "Google", icon: "cloud" }
-        ]
-        Component.onCompleted: {
-            currentIndex = PluginService.loadPluginData(settingsRoot.pluginId, "aiProvider", "openrouter") === "google" ? 1 : 0
+        StyledText {
+            width: parent.width
+            text: "Dictate with Mod+Shift+A (or `dms ipc call penguinWhisperer toggleAi`) and the audio recording is sent straight to an audio-capable model, which transcribes and formats it in one pass — rambling in, clear formatted text out. Your custom vocabulary and snippet triggers are included in the prompt, and snippets expand here too when the whole dictation matches a trigger. Pressing Mod+Shift+A while already recording also finishes with AI transcription. On failure it falls back to local whisper. Configure each provider in its tab, then pick which one is active below."
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.surfaceVariantText
+            wrapMode: Text.WordWrap
         }
-        onTabClicked: index => currentIndex = index
-    }
 
-    // OpenRouter provider tab
-    Column {
-        width: parent.width
-        spacing: Theme.spacingM
-        visible: providerTabs.currentIndex === 0
+        // DankTabBar draws its underline ~10px below its own height, outside
+        // its layout bounds, so the column reserves no space for it. Wrap it
+        // so the card leaves room for the underline plus a margin before the
+        // provider fields below.
+        Item {
+            width: parent.width
+            height: providerTabs.height + Theme.spacingL
 
-        SecretSetting {
-            settingKey: "aiApiKey"
-            label: "OpenRouter API key"
-            description: "Create one at openrouter.ai/keys. Stored in your login keyring; sent only to openrouter.ai."
-            placeholder: "sk-or-v1-…"
+            DankTabBar {
+                id: providerTabs
+                width: Math.min(320, parent.width)
+                model: [
+                    { text: "OpenRouter", icon: "hub" },
+                    { text: "Google", icon: "cloud" }
+                ]
+                Component.onCompleted: {
+                    currentIndex = PluginService.loadPluginData(settingsRoot.pluginId, "aiProvider", "openrouter") === "google" ? 1 : 0
+                }
+                onTabClicked: index => currentIndex = index
+            }
+        }
+
+        // OpenRouter provider tab
+        Column {
+            width: parent.width
+            spacing: Theme.spacingM
+            visible: providerTabs.currentIndex === 0
+
+            SecretSetting {
+                settingKey: "aiApiKey"
+                label: "OpenRouter API key"
+                description: "Create one at openrouter.ai/keys. Stored in your login keyring; sent only to openrouter.ai."
+                placeholder: "sk-or-v1-…"
+                defaultValue: ""
+            }
+
+            ModelSelect {
+                settingKey: "aiModel"
+                label: "Model"
+                description: settingsRoot.aiModelsLive
+                             ? "Audio-capable models from the OpenRouter catalog — click to search"
+                             : "Known audio-capable models (couldn't fetch the live OpenRouter catalog)"
+                options: settingsRoot.aiModelOptions
+                defaultValue: "google/gemini-3.5-flash"
+            }
+        }
+
+        // Google (Gemini API) provider tab
+        Column {
+            width: parent.width
+            spacing: Theme.spacingM
+            visible: providerTabs.currentIndex === 1
+
+            SecretSetting {
+                settingKey: "googleApiKey"
+                label: "Google AI Studio API key"
+                description: "Free tier available — create one at aistudio.google.com/apikey. Stored in your login keyring; sent only to generativelanguage.googleapis.com."
+                placeholder: "AIza…"
+                defaultValue: ""
+            }
+
+            ModelSelect {
+                settingKey: "googleModel"
+                label: "Model"
+                description: settingsRoot.googleModelsLive
+                             ? "Gemini models from your account's catalog — click to search"
+                             : "Common Gemini models (the live catalog loads once an API key is set)"
+                options: settingsRoot.googleModelOptions
+                defaultValue: "gemini-2.5-flash"
+            }
+        }
+
+        SelectionSetting {
+            settingKey: "aiProvider"
+            label: "Active provider"
+            description: "Which provider Mod+Shift+A uses"
+            options: [
+                { label: "OpenRouter", value: "openrouter" },
+                { label: "Google (Gemini API)", value: "google" }
+            ]
+            defaultValue: "openrouter"
+        }
+
+        StringSetting {
+            settingKey: "aiStyle"
+            label: "Extra style instructions (optional)"
+            description: "Appended to the cleanup prompt, e.g. \"British spelling\" or \"keep it casual, no em dashes\""
+            placeholder: ""
             defaultValue: ""
         }
-
-        ModelSelect {
-            settingKey: "aiModel"
-            label: "Model"
-            description: settingsRoot.aiModelsLive
-                         ? "Audio-capable models from the OpenRouter catalog — click to search"
-                         : "Known audio-capable models (couldn't fetch the live OpenRouter catalog)"
-            options: settingsRoot.aiModelOptions
-            defaultValue: "google/gemini-3.5-flash"
-        }
-    }
-
-    // Google (Gemini API) provider tab
-    Column {
-        width: parent.width
-        spacing: Theme.spacingM
-        visible: providerTabs.currentIndex === 1
-
-        SecretSetting {
-            settingKey: "googleApiKey"
-            label: "Google AI Studio API key"
-            description: "Free tier available — create one at aistudio.google.com/apikey. Stored in your login keyring; sent only to generativelanguage.googleapis.com."
-            placeholder: "AIza…"
-            defaultValue: ""
-        }
-
-        ModelSelect {
-            settingKey: "googleModel"
-            label: "Model"
-            description: settingsRoot.googleModelsLive
-                         ? "Gemini models from your account's catalog — click to search"
-                         : "Common Gemini models (the live catalog loads once an API key is set)"
-            options: settingsRoot.googleModelOptions
-            defaultValue: "gemini-2.5-flash"
-        }
-    }
-
-    SelectionSetting {
-        settingKey: "aiProvider"
-        label: "Active provider"
-        description: "Which provider Mod+Shift+A uses"
-        options: [
-            { label: "OpenRouter", value: "openrouter" },
-            { label: "Google (Gemini API)", value: "google" }
-        ]
-        defaultValue: "openrouter"
-    }
-
-    StringSetting {
-        settingKey: "aiStyle"
-        label: "Extra style instructions (optional)"
-        description: "Appended to the cleanup prompt, e.g. \"British spelling\" or \"keep it casual, no em dashes\""
-        placeholder: ""
-        defaultValue: ""
     }
 
     // ── Recording ──────────────────────────────────────────────────────────
 
-    StyledText {
-        width: parent.width
-        text: "Recording"
-        font.pixelSize: Theme.fontSizeLarge
-        font.weight: Font.Bold
-        color: Theme.surfaceText
+    Card {
+        title: "Recording"
+
+        ToggleSetting {
+            settingKey: "autoStopEnabled"
+            label: "Auto-stop on silence"
+            description: "Stop dictation automatically after a stretch of silence. Only arms once you've actually said something, so it won't cut off a slow start. When off, recording keeps going until you click the bar pill or hit the keybind again (5 minute cap either way)."
+            defaultValue: false
+        }
+
+        SliderSetting {
+            settingKey: "autoStopSeconds"
+            label: "Silence before auto-stop"
+            description: "How long a pause has to last before dictation stops — raise it if you like to think mid-sentence"
+            minimum: 1
+            maximum: 15
+            defaultValue: 3
+            unit: "s"
+        }
+
+        ToggleSetting {
+            settingKey: "cancelBackgroundMusic"
+            label: "Cancel background music"
+            description: "Dictate over music playing on speakers. When PipeWire echo cancellation is available it removes the speaker audio from the recording before transcription; otherwise it just pauses your media players while you record. Off by default, and if anything fails it falls back to the plain microphone."
+            defaultValue: false
+        }
+
+        SelectionSetting {
+            settingKey: "overlayPosition"
+            label: "Overlay position"
+            description: "Screen edge where the recording overlay pops up"
+            options: [
+                { label: "Bottom", value: "bottom" },
+                { label: "Top", value: "top" }
+            ]
+            defaultValue: "bottom"
+        }
     }
 
-    ToggleSetting {
-        settingKey: "autoStopEnabled"
-        label: "Auto-stop on silence"
-        description: "Stop dictation automatically after a stretch of silence. Only arms once you've actually said something, so it won't cut off a slow start. When off, recording keeps going until you click the bar pill or hit the keybind again (5 minute cap either way)."
-        defaultValue: false
-    }
+    // ── Transcription ──────────────────────────────────────────────────────
 
-    SliderSetting {
-        settingKey: "autoStopSeconds"
-        label: "Silence before auto-stop"
-        description: "How long a pause has to last before dictation stops — raise it if you like to think mid-sentence"
-        minimum: 1
-        maximum: 15
-        defaultValue: 3
-        unit: "s"
-    }
+    Card {
+        title: "Transcription"
 
-    SelectionSetting {
-        settingKey: "overlayPosition"
-        label: "Overlay position"
-        description: "Screen edge where the recording overlay pops up"
-        options: [
-            { label: "Bottom", value: "bottom" },
-            { label: "Top", value: "top" }
-        ]
-        defaultValue: "bottom"
-    }
+        ListSettingWithInput {
+            settingKey: "customWords"
+            label: "Custom vocabulary"
+            description: "Names, jargon, and unusual spellings the transcriber should know. Fed to whisper as an initial prompt — keep the list short (a few dozen words) for best effect."
+            defaultValue: []
+            fields: [
+                {id: "word", label: "Word or phrase", placeholder: "DankMaterialShell", width: 280, required: true}
+            ]
+        }
 
-    // ── Behaviour ──────────────────────────────────────────────────────────
+        SelectionSetting {
+            settingKey: "language"
+            label: "Language"
+            description: "Auto-detect requires a multilingual model (e.g. small)"
+            options: [
+                {label: "English", value: "en"},
+                {label: "Auto-detect", value: "auto"}
+            ]
+            defaultValue: "en"
+        }
 
-    ListSettingWithInput {
-        settingKey: "customWords"
-        label: "Custom vocabulary"
-        description: "Names, jargon, and unusual spellings the transcriber should know. Fed to whisper as an initial prompt — keep the list short (a few dozen words) for best effect."
-        defaultValue: []
-        fields: [
-            {id: "word", label: "Word or phrase", placeholder: "DankMaterialShell", width: 280, required: true}
-        ]
-    }
+        ToggleSetting {
+            settingKey: "typeText"
+            label: "Type at cursor"
+            description: "Type the transcript into the focused window using wtype"
+            defaultValue: true
+        }
 
-    SelectionSetting {
-        settingKey: "language"
-        label: "Language"
-        description: "Auto-detect requires a multilingual model (e.g. small)"
-        options: [
-            {label: "English", value: "en"},
-            {label: "Auto-detect", value: "auto"}
-        ]
-        defaultValue: "en"
-    }
+        ToggleSetting {
+            settingKey: "copyText"
+            label: "Copy to clipboard"
+            description: "Also copy the transcript to the clipboard"
+            defaultValue: true
+        }
 
-    ToggleSetting {
-        settingKey: "typeText"
-        label: "Type at cursor"
-        description: "Type the transcript into the focused window using wtype"
-        defaultValue: true
-    }
+        ToggleSetting {
+            settingKey: "soundCues"
+            label: "Sound cues"
+            description: "Play a soft chime when recording starts, finishes, or fails"
+            defaultValue: true
+        }
 
-    ToggleSetting {
-        settingKey: "copyText"
-        label: "Copy to clipboard"
-        description: "Also copy the transcript to the clipboard"
-        defaultValue: true
-    }
-
-    ToggleSetting {
-        settingKey: "soundCues"
-        label: "Sound cues"
-        description: "Play a soft chime when recording starts, finishes, or fails"
-        defaultValue: true
-    }
-
-    StringSetting {
-        settingKey: "whisperBin"
-        label: "whisper-cli path"
-        description: "Path to the whisper.cpp CLI binary"
-        placeholder: "~/.local/bin/whisper-cli"
-        defaultValue: Quickshell.env("HOME") + "/.local/bin/whisper-cli"
+        StringSetting {
+            settingKey: "whisperBin"
+            label: "whisper-cli path"
+            description: "Path to the whisper.cpp CLI binary"
+            placeholder: "~/.local/bin/whisper-cli"
+            defaultValue: Quickshell.env("HOME") + "/.local/bin/whisper-cli"
+        }
     }
 }
