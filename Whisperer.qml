@@ -91,6 +91,68 @@ PluginComponent {
 
     readonly property string modelName: modelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
 
+    // Whisper pre-flight: a local transcription needs both the whisper-cli
+    // binary (executable) and the model file (readable). These are probed on
+    // load and whenever settings change — never on every record click — so the
+    // Record button and startRecording() gate reflect current state cheaply.
+    // Until the async probe confirms them, both stay false and recording is
+    // blocked, which is the safe default for a first run with nothing installed.
+    property bool whisperBinReady: false
+    property bool modelFileReady: false
+    readonly property bool localReady: whisperBinReady && modelFileReady
+
+    // Human-readable reason the local pipeline can't run yet ("" when ready),
+    // shown in the popout and used as the blocked-start error message.
+    readonly property string preflightReason: {
+        if (localReady)
+            return ""
+        if (!whisperBinReady && !modelFileReady)
+            return "whisper-cli and model not found — check paths in settings"
+        if (!whisperBinReady)
+            return "whisper-cli not found (or not executable): " + whisperBin
+        return "model not found: " + modelPath
+    }
+
+    // test -x / -r cover "exists and executable" / "exists and readable" in one
+    // call each, and are false for an empty path — no separate existence check.
+    // When the stored binary path doesn't resolve, fall back to locating one on
+    // PATH so a fresh install works without the user entering anything.
+    function checkPreflight() {
+        Proc.runCommand("whisperer.preflight.bin",
+                        ["test", "-x", whisperBin],
+                        (out, code) => {
+                            if (code === 0) {
+                                root.whisperBinReady = true
+                            } else {
+                                root.whisperBinReady = false
+                                root.detectWhisperBin()
+                            }
+                        })
+        Proc.runCommand("whisperer.preflight.model",
+                        ["test", "-r", modelPath],
+                        (out, code) => root.modelFileReady = (code === 0))
+    }
+
+    // Ask the shell where whisper.cpp lives instead of trusting the stored path.
+    // whisper-cli is its current binary name; some builds ship it as
+    // whisper-cpp / whisper.cpp. On a hit we adopt and persist the path — the
+    // save flows back through onPluginDataChanged — and mark the binary ready.
+    function detectWhisperBin() {
+        Proc.runCommand("whisperer.detectBin",
+                        ["sh", "-c",
+                         "command -v whisper-cli || command -v whisper-cpp || command -v whisper.cpp"],
+                        (out, code) => {
+                            const found = (out || "").trim()
+                            if (code === 0 && found.length > 0) {
+                                root.whisperBinReady = true
+                                if (found !== root.whisperBin) {
+                                    root.whisperBin = found
+                                    PluginService.savePluginData(root.whispererId, "whisperBin", found)
+                                }
+                            }
+                        })
+    }
+
     // Custom vocabulary + snippet triggers, cleaned: the exact terms whisper
     // and the AI prompt should bias toward. Shared by vocabPrompt (below) and
     // aiSystemPrompt().
@@ -193,6 +255,7 @@ PluginComponent {
     Component.onCompleted: {
         loadSettings()
         detectAudioCleanup()
+        checkPreflight()
     }
 
     // Killing the pw-cli client unloads the echo-cancel module (its lifetime is
@@ -211,6 +274,8 @@ PluginComponent {
                 // Re-run detection so toggling the setting live loads or unloads
                 // the AEC module (and restores media if we were ducking).
                 root.detectAudioCleanup()
+                // Re-probe in case the binary/model path was just corrected.
+                root.checkPreflight()
                 if (!root.cancelBackgroundMusic)
                     root.restoreMedia()
             }
@@ -344,6 +409,15 @@ PluginComponent {
 
     function startRecording(aiEdit) {
         aiSession = aiEdit === true
+        // Pre-flight gate: don't record a clip we can't transcribe. An AI
+        // session with a key transcribes over the API (local whisper is only its
+        // fallback), so it's allowed through; every other path — plain local
+        // dictation, or an AI attempt with no key that degrades to local —
+        // requires the local binary and model to be present.
+        if (!(aiSession && activeAiKey.trim().length > 0) && !localReady) {
+            fail(preflightReason)
+            return
+        }
         sttState = "recording"
         elapsedSeconds = 0
         levelHistory = new Array(waveBarCount).fill(0)
@@ -456,8 +530,7 @@ PluginComponent {
         doneKind = "error"
         doneText = "No speech detected"
         doneLingerTimer.restart()
-        if (typeof ToastService !== "undefined")
-            ToastService.showInfo("Whisperer: no speech detected")
+        // No toast — the overlay flash above already reports this.
     }
 
     // True if ch is a cased letter (any script), a digit, or an uncased-script
@@ -1259,6 +1332,12 @@ PluginComponent {
         }
     }
 
+    // Right-click the pill is a quick toggle for local dictation. Left-click is
+    // left as the default (open the popout) on purpose: left-clicking a status
+    // pill to open its popout is muscle memory, so binding recording to it caused
+    // accidental recordings — right-click isn't a reflexive gesture, so it's safe.
+    pillRightClickAction: () => root.toggleRecording()
+
     // ── Popout: status, actions, transcript history ────────────────────────
 
     popoutWidth: 380
@@ -1268,8 +1347,20 @@ PluginComponent {
         PopoutComponent {
             id: popoutRoot
             headerText: "Whisperer"
-            detailsText: "Local dictation · " + root.modelName + " · Mod+Shift+D / Mod+Shift+A (AI)"
+            detailsText: "Local dictation · " + root.modelName + " · Record below, IPC, or a keybind"
             showCloseButton: true
+
+            // Re-probe each time the popout opens, so a binary/model installed
+            // after startup (without touching settings) is picked up and the
+            // Record button ungates without a restart. parentPopout is wired by
+            // the popout Loader once this content is loaded.
+            Connections {
+                target: popoutRoot.parentPopout
+                function onShouldBeVisibleChanged() {
+                    if (popoutRoot.parentPopout && popoutRoot.parentPopout.shouldBeVisible)
+                        root.checkPreflight()
+                }
+            }
 
             headerActions: Component {
                 Row {
@@ -1328,9 +1419,14 @@ PluginComponent {
                         StyledText {
                             width: parent.width
                             elide: Text.ElideRight
-                            text: root.aiSession ? ("AI · " + root.activeAiModelShort) : ("Local · " + root.modelName)
+                            // Surface the pre-flight problem when idle so the user
+                            // sees why Record is disabled without recording first.
+                            text: (root.sttState === "idle" && !root.localReady)
+                                  ? root.preflightReason
+                                  : (root.aiSession ? ("AI · " + root.activeAiModelShort) : ("Local · " + root.modelName))
                             font.pixelSize: Theme.fontSizeSmall
-                            color: Theme.surfaceVariantText
+                            color: (root.sttState === "idle" && !root.localReady)
+                                   ? Theme.warning : Theme.surfaceVariantText
                         }
                     }
 
@@ -1346,16 +1442,52 @@ PluginComponent {
                             iconName: root.sttState === "recording" ? "stop" : "mic"
                             backgroundColor: root.sttState === "recording" ? Theme.error : Theme.primary
                             buttonHeight: 36
+                            // Local dictation needs the whisper pipeline; Stop is
+                            // always allowed so an in-flight recording can end.
+                            enabled: root.sttState === "recording" || root.localReady
                             onClicked: root.toggleRecording()
                         }
 
                         DankActionButton {
                             iconName: "auto_awesome"
-                            tooltipText: root.sttState === "recording" ? "Stop & transcribe with AI" : "Record with AI transcription"
+                            tooltipText: root.sttState === "recording"
+                                         ? "Stop & transcribe with AI"
+                                         : (root.localReady || root.activeAiKey.trim().length > 0
+                                            ? "Record with AI transcription"
+                                            : root.preflightReason)
                             tooltipSide: "bottom"
                             buttonSize: 36
+                            // AI needs either a key (API transcription) or the
+                            // local pipeline (its fallback) to be viable.
+                            enabled: root.sttState === "recording" || root.localReady || root.activeAiKey.trim().length > 0
                             onClicked: root.toggleAiRecording()
                         }
+                    }
+                }
+
+                // Discoverability: right-click-to-dictate isn't an obvious gesture
+                // on a status pill, so spell it out. Hidden while active so it
+                // doesn't distract mid-recording.
+                Row {
+                    width: parent.width
+                    spacing: Theme.spacingXS
+                    visible: !root.overlayActive
+
+                    DankIcon {
+                        id: hintIcon
+                        name: "mouse"
+                        size: Theme.fontSizeSmall + 2
+                        color: Theme.surfaceVariantText
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    StyledText {
+                        width: parent.width - hintIcon.width - parent.spacing
+                        text: "Tip: right-click the pill to dictate without opening this"
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.surfaceVariantText
+                        wrapMode: Text.WordWrap
+                        anchors.verticalCenter: parent.verticalCenter
                     }
                 }
 
