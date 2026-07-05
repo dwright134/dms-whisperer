@@ -811,6 +811,13 @@ PluginSettings {
         unit: "s"
     }
 
+    ToggleSetting {
+        settingKey: "cancelBackgroundMusic"
+        label: "Cancel background music"
+        description: "Dictate over music playing on speakers. When PipeWire echo cancellation is available it removes the speaker audio from the recording before transcription; otherwise it just pauses your media players while you record. Off by default, and if anything fails it falls back to the plain microphone."
+        defaultValue: false
+    }
+
     SelectionSetting {
         settingKey: "overlayPosition"
         label: "Overlay position"

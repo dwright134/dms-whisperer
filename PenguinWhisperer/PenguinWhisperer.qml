@@ -13,6 +13,8 @@ PluginComponent {
     readonly property string whispererId: "penguinWhisperer"
     readonly property string home: Quickshell.env("HOME")
     readonly property string recordingPath: "/tmp/penguin-whisperer-recording.wav"
+    // Records which media players we paused (duck fallback) so we resume only those
+    readonly property string duckMarkerPath: "/tmp/penguin-whisperer-ducked"
     readonly property int maxRecordSeconds: 300
     // whisper-cli CPU threads (-t)
     readonly property int transcribeThreads: 4
@@ -49,6 +51,24 @@ PluginComponent {
     property string overlayPosition: "bottom"  // "bottom" | "top"
     property bool autoStopEnabled: false
     property int autoStopSeconds: 3
+    // Remove speaker audio (music) from the recording. When PipeWire echo
+    // cancellation is available it captures a cleaned virtual mic; otherwise it
+    // falls back to pausing media players while recording (see aecTier below).
+    property bool cancelBackgroundMusic: false
+
+    // Background-music handling, chosen by capability (see detectAudioCleanup):
+    //   "aec"  – PipeWire echo-cancel virtual source available (preferred)
+    //   "duck" – no AEC, but playerctl present, so pause media while recording
+    //   "none" – feature unavailable; record the raw mic exactly as before
+    property string aecTier: "none"
+    // The echo-cancel virtual source is confirmed present and ready to record from
+    property bool aecReady: false
+    // Named virtual source exposed by the echo-cancel module
+    readonly property string aecSourceName: "penguin-whisperer-aec"
+    // True only when we should actually capture through the cleaned source. Any
+    // failure to load/confirm it leaves this false, so recording falls back to
+    // the default mic — never worse than before the feature existed.
+    readonly property bool aecActive: cancelBackgroundMusic && aecTier === "aec" && aecReady
 
     readonly property bool overlayAtTop: overlayPosition === "top"
 
@@ -124,6 +144,7 @@ PluginComponent {
         overlayPosition = PluginService.loadPluginData(whispererId, "overlayPosition", "bottom")
         autoStopEnabled = PluginService.loadPluginData(whispererId, "autoStopEnabled", false)
         autoStopSeconds = PluginService.loadPluginData(whispererId, "autoStopSeconds", 3)
+        cancelBackgroundMusic = PluginService.loadPluginData(whispererId, "cancelBackgroundMusic", false)
         history = PluginService.loadPluginData(whispererId, "history", [])
     }
 
@@ -169,14 +190,117 @@ PluginComponent {
         p.running = true
     }
 
-    Component.onCompleted: loadSettings()
+    Component.onCompleted: {
+        loadSettings()
+        detectAudioCleanup()
+    }
+
+    // Killing the pw-cli client unloads the echo-cancel module (its lifetime is
+    // tied to that connection), so tearing this Process down leaves no orphaned
+    // virtual source behind. Also un-pause any media we ducked.
+    Component.onDestruction: {
+        aecModule.running = false
+        restoreMedia()
+    }
 
     Connections {
         target: PluginService
         function onPluginDataChanged(pluginId) {
-            if (pluginId === root.whispererId)
+            if (pluginId === root.whispererId) {
                 root.loadSettings()
+                // Re-run detection so toggling the setting live loads or unloads
+                // the AEC module (and restores media if we were ducking).
+                root.detectAudioCleanup()
+                if (!root.cancelBackgroundMusic)
+                    root.restoreMedia()
+            }
         }
+    }
+
+    // Pick the background-music strategy from what's actually available:
+    // PipeWire echo cancellation if its module is installed and the daemon is
+    // up, otherwise ducking media players if playerctl exists, otherwise nothing.
+    // The module can live in different libdirs across distros, so glob for it.
+    function detectAudioCleanup() {
+        if (!cancelBackgroundMusic) {
+            aecTier = "none"
+            aecReady = false
+            aecModule.running = false
+            return
+        }
+        Proc.runCommand("penguinWhisperer.aec.detect",
+            ["sh", "-c",
+             "pw-cli info 0 >/dev/null 2>&1 || { echo none; exit 0; }; " +
+             "for d in /usr/lib/pipewire-0.3 /usr/lib64/pipewire-0.3 /usr/lib/*/pipewire-0.3; do " +
+             "[ -e \"$d/libpipewire-module-echo-cancel.so\" ] && { echo aec; exit 0; }; done; " +
+             "command -v playerctl >/dev/null 2>&1 && echo duck || echo none"],
+            (out, code) => {
+                root.aecTier = (out || "").trim() || "none"
+                if (root.aecTier === "aec") {
+                    root.ensureAecModule()
+                } else {
+                    root.aecReady = false
+                    aecModule.running = false
+                }
+            })
+    }
+
+    // Arguments for libpipewire-module-echo-cancel. monitor.mode references the
+    // default sink's monitor as the far-end signal instead of creating a virtual
+    // sink, so nothing about the user's playback or default devices changes. The
+    // source is named (for pw-record --target) and kept virtual/non-default so it
+    // never steals mic input from other apps.
+    function aecModuleArgs() {
+        return '{ monitor.mode = true '
+             + 'source.props = { node.name = "' + aecSourceName + '" '
+             + 'node.description = "Penguin Whisperer (echo-cancelled mic)" '
+             + 'node.virtual = true } '
+             + 'capture.props = { node.passive = true } }'
+    }
+
+    // Make sure the echo-cancel source exists, loading the module if it doesn't.
+    // Called on detection and before each recording, so the source is recreated
+    // after a PipeWire restart. Sets aecReady only once the node is confirmed;
+    // until then aecActive stays false and recording uses the raw mic.
+    function ensureAecModule() {
+        if (!cancelBackgroundMusic || aecTier !== "aec")
+            return
+        Proc.runCommand("penguinWhisperer.aec.check",
+            ["sh", "-c",
+             "pw-cli ls Node 2>/dev/null | grep -q 'node.name = \"" + aecSourceName + "\"'"],
+            (out, code) => {
+                if (code === 0) {
+                    root.aecReady = true
+                } else {
+                    root.aecReady = false
+                    if (!aecModule.running) {
+                        aecModule.running = true           // onStarted loads the module
+                        aecRecheckTimer.restart()          // confirm the node appears
+                    }
+                }
+            })
+    }
+
+    // Duck fallback: pause only the players that are currently Playing, recording
+    // their names so restoreMedia resumes exactly those (never un-pausing music
+    // the user had already paused). Fire-and-forget, like the sound cues.
+    function duckMedia() {
+        if (!(cancelBackgroundMusic && aecTier === "duck"))
+            return
+        Quickshell.execDetached(["sh", "-c",
+            "> '" + duckMarkerPath + "'; " +
+            "playerctl -l 2>/dev/null | while IFS= read -r p; do " +
+            "[ \"$(playerctl -p \"$p\" status 2>/dev/null)\" = Playing ] && " +
+            "{ printf '%s\\n' \"$p\" >> '" + duckMarkerPath + "'; playerctl -p \"$p\" pause; }; done"])
+    }
+
+    // Resume whatever we ducked. Idempotent — guarded by the marker file, which it
+    // removes — so it's safe to call on stop, error, toggle-off, and destruction.
+    function restoreMedia() {
+        Quickshell.execDetached(["sh", "-c",
+            "[ -f '" + duckMarkerPath + "' ] || exit 0; " +
+            "while IFS= read -r p; do playerctl -p \"$p\" play 2>/dev/null; done < '" + duckMarkerPath + "'; " +
+            "rm -f '" + duckMarkerPath + "'"])
     }
 
     function playCue(kind) {
@@ -227,6 +351,12 @@ PluginComponent {
         voiceHeard = false
         noiseFloor = 500
         lastVoiceAt = Date.now()
+        if (cancelBackgroundMusic) {
+            if (aecTier === "aec")
+                ensureAecModule()   // recreate the source if a PipeWire restart dropped it
+            else if (aecTier === "duck")
+                duckMedia()
+        }
         recorder.running = true
         playCue("start")
     }
@@ -256,6 +386,7 @@ PluginComponent {
     }
 
     function stopRecording() {
+        restoreMedia()   // resume any ducked players (no-op if we didn't duck)
         if (!recorder.running) {
             sttState = "idle"
             return
@@ -266,6 +397,7 @@ PluginComponent {
     }
 
     function fail(message) {
+        restoreMedia()   // never leave media paused because a recording errored out
         console.warn("PenguinWhisperer:", message)
         sttState = "error"
         doneKind = "error"
@@ -436,7 +568,16 @@ PluginComponent {
 
     Process {
         id: recorder
-        command: ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", root.recordingPath]
+        // Capture from the echo-cancelled source when it's active, otherwise the
+        // default mic. aecActive already requires the source to be confirmed
+        // ready, so a not-yet-warm source simply falls through to the raw mic.
+        command: {
+            const c = ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16"]
+            if (root.aecActive)
+                c.push("--target", root.aecSourceName)
+            c.push(root.recordingPath)
+            return c
+        }
         onExited: exitCode => {
             if (root.sttState === "stopping") {
                 root.sttState = root.aiSession && root.activeAiKey.trim().length > 0 ? "polishing" : "transcribing"
@@ -453,12 +594,45 @@ PluginComponent {
     Process {
         id: levelMonitor
         running: root.sttState === "recording"
+        // Meter the same source the recorder captures, so the waveform and the
+        // adaptive noise-floor/auto-stop logic react to the cleaned audio rather
+        // than to music the recording no longer contains.
         command: ["sh", "-c",
-                  "pw-record --rate 8000 --channels 1 --format s16 - | od -An -v -td2 -w2 | " +
+                  "pw-record --rate 8000 --channels 1 --format s16 " +
+                  (root.aecActive ? "--target " + root.aecSourceName + " " : "") +
+                  "- | od -An -v -td2 -w2 | " +
                   "awk '{v=$1<0?-$1:$1; if(v>p)p=v; if(++n>=800){print p; p=0; n=0; fflush()}}'"]
         stdout: SplitParser {
             onRead: data => root.handleLevel(parseInt(data.trim(), 10) || 0)
         }
+    }
+
+    // Owns the PipeWire echo-cancel module. pw-cli holds the module for exactly
+    // as long as this client stays connected (verified: the virtual source
+    // disappears the moment the client dies), so keeping this Process running
+    // keeps the AEC source warm — better cancellation — and setting running=false
+    // (toggle off, or Component.onDestruction) tears it down cleanly with no
+    // explicit unload and no orphaned node. pw-cli keeps running after stdin EOF.
+    Process {
+        id: aecModule
+        running: false
+        command: ["pw-cli"]
+        stdinEnabled: true
+        onStarted: write("load-module libpipewire-module-echo-cancel " + root.aecModuleArgs() + "\n")
+        onExited: exitCode => {
+            root.aecReady = false
+            // A PipeWire restart drops our client; re-arm if the feature still wants it.
+            if (root.cancelBackgroundMusic && root.aecTier === "aec")
+                aecRecheckTimer.restart()
+        }
+    }
+
+    // Re-runs ensureAecModule shortly after a (re)load to flip aecReady once the
+    // source node actually appears, and to reload after the client is dropped.
+    Timer {
+        id: aecRecheckTimer
+        interval: 700
+        onTriggered: root.ensureAecModule()
     }
 
     // Peak-level gate: silence skips transcription entirely
