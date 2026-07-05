@@ -1,7 +1,7 @@
 {
     "id": "whisperer",
     "name": "Whisperer",
-    "description": "Push-to-talk dictation: records your voice, transcribes it locally with whisper.cpp, and types the result at the cursor",
+    "description": "Voice dictation: records your voice, transcribes it locally with whisper.cpp, and types the result at the cursor",
     "version": "0.2.0",
     "author": "dwright",
     "type": "widget",
