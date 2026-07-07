@@ -77,7 +77,7 @@ Update later with `git -C ~/.config/DankMaterialShell/plugins/whisperer pull`.
    button if it's missing).
 2. **Download a model** — DMS Settings → Plugins → Whisperer → model manager. `base.en` is a good
    default; `tiny.en` is fastest; `small`/`small.en` are more accurate; pick a multilingual model
-   (`small`) if you want language auto-detect.
+   (`small`) if you dictate in a language other than English or want auto-detect.
 3. **A keybind** (optional) — Whisperer doesn't claim any global shortcut. Dictation is started by
    **right-clicking the bar mic pill** (quick local toggle), from the **Record** / **AI** buttons
    in the popout (left-click the pill to open it), or via IPC (`dms ipc call whisperer toggle` /
@@ -209,6 +209,10 @@ Mod+Shift+A { spawn "dms" "ipc" "call" "whisperer" "toggleAi"; }
 - **Custom vocabulary**: add names, jargon, and tricky spellings in settings; they're passed to
   whisper as an initial prompt (`--prompt` + `--carry-initial-prompt`) to bias decoding. Keep the
   list to a few dozen entries — the prompt is capped at ~224 tokens and biasing weakens as it grows.
+- **Languages & translation**: pick the dictation language in settings (English, auto-detect,
+  Spanish, French, German — non-English needs a multilingual model), and optionally translate the
+  output to English: locally via whisper's translate task (`-tr`), and in AI mode the model is
+  instructed to translate instead of preserving the spoken language.
 - **Voice snippets**: define trigger phrase → full text pairs. The expansion is typed when the
   *entire* dictation matches a trigger (ignoring case/punctuation, in both local and AI mode) —
   triggers inside longer sentences are left alone. `\n` in the expansion becomes a real line break.

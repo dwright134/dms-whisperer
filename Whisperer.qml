@@ -37,6 +37,7 @@ PluginComponent {
     property string whisperBin: home + "/.local/bin/whisper-cli"
     property string modelPath: home + "/.local/share/whisperer/models/ggml-base.en.bin"
     property string language: "en"
+    property bool translateToEnglish: false
     property bool typeText: true
     property bool copyText: true
     property bool soundCues: true
@@ -196,6 +197,7 @@ PluginComponent {
         whisperBin = PluginService.loadPluginData(whispererId, "whisperBin", home + "/.local/bin/whisper-cli")
         modelPath = PluginService.loadPluginData(whispererId, "modelPath", home + "/.local/share/whisperer/models/ggml-base.en.bin")
         language = PluginService.loadPluginData(whispererId, "language", "en")
+        translateToEnglish = PluginService.loadPluginData(whispererId, "translateToEnglish", false)
         typeText = PluginService.loadPluginData(whispererId, "typeText", true)
         copyText = PluginService.loadPluginData(whispererId, "copyText", true)
         soundCues = PluginService.loadPluginData(whispererId, "soundCues", true)
@@ -841,6 +843,8 @@ PluginComponent {
                          "-l", root.language,
                          "-t", String(root.transcribeThreads),
                          "--no-timestamps", "--no-prints", "--suppress-nst"]
+            if (root.translateToEnglish)
+                cmd.push("-tr")
             if (root.vocabPrompt.length > 0)
                 cmd.push("--prompt", root.vocabPrompt, "--carry-initial-prompt")
             return cmd
@@ -873,8 +877,11 @@ PluginComponent {
               + "list use '1. ', '2. ', and so on. Cues like 'next item', 'next bullet', or a spoken number "
               + "start a new item, and 'end of list' returns to normal text. Otherwise never insert paragraph "
               + "or line breaks on your own: pauses and topic changes are NOT breaks, and the whole output must "
-              + "be a single line unless the speaker explicitly commands a break or a list. Preserve the meaning, tone, and "
-              + "language of the speaker. Output ONLY the final text, with no preamble, quotes, or commentary."
+              + "be a single line unless the speaker explicitly commands a break or a list. "
+              + (translateToEnglish
+                 ? "Translate the speech into English, preserving the meaning and tone of the speaker. "
+                 : "Preserve the meaning, tone, and language of the speaker. ")
+              + "Output ONLY the final text, with no preamble, quotes, or commentary."
         // Snippet triggers ride along so they transcribe verbatim and the
         // whole-dictation trigger match can fire on AI transcripts too
         const words = vocabWords()

@@ -1024,12 +1024,22 @@ PluginSettings {
         SelectionSetting {
             settingKey: "language"
             label: "Language"
-            description: "Auto-detect requires a multilingual model (e.g. small)"
+            description: "Anything other than English requires a multilingual model (e.g. small)"
             options: [
                 {label: "English", value: "en"},
-                {label: "Auto-detect", value: "auto"}
+                {label: "Auto-detect", value: "auto"},
+                {label: "Spanish", value: "es"},
+                {label: "French", value: "fr"},
+                {label: "German", value: "de"}
             ]
             defaultValue: "en"
+        }
+
+        ToggleSetting {
+            settingKey: "translateToEnglish"
+            label: "Translate to English"
+            description: "Output the dictation in English instead of the spoken language — whisper's translate task locally, and the AI model is instructed to translate"
+            defaultValue: false
         }
 
         ToggleSetting {
