@@ -34,8 +34,18 @@ PluginComponent {
     property bool aiSession: false
 
     // Settings (persisted via PluginService)
+    // Local transcription backend: "whisper.cpp" (bundled model files) or
+    // "faster-whisper" (whisper-ctranslate2 CLI). Only backends actually
+    // installed are offered in settings; this may still hold an uninstalled
+    // value if the tool was removed after selection.
+    property string backend: "whisper.cpp"
     property string whisperBin: home + "/.local/bin/whisper-cli"
     property string modelPath: home + "/.local/share/whisperer/models/ggml-base.en.bin"
+    // Model size name for faster-whisper. Settings can download it into a
+    // managed directory (fwModelsDir/<name>) which we pass via --model_directory;
+    // if it isn't downloaded there, the tool fetches it into its own cache.
+    property string ctModel: "base.en"
+    readonly property string fwModelsDir: home + "/.local/share/whisperer/faster-whisper"
     property string language: "en"
     property bool translateToEnglish: false
     property bool typeText: true
@@ -90,7 +100,11 @@ PluginComponent {
     // Bare model name for display (drops the "vendor/" prefix)
     readonly property string activeAiModelShort: activeAiModel.split("/").pop()
 
-    readonly property string modelName: modelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
+    // Name shown in the "Transcribing (…)" status. faster-whisper is driven by
+    // ctModel; whisper.cpp derives it from the model file it loads.
+    readonly property string modelName: backend === "faster-whisper"
+        ? ctModel
+        : modelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
 
     // Whisper pre-flight: a local transcription needs both the whisper-cli
     // binary (executable) and the model file (readable). These are probed on
@@ -100,13 +114,34 @@ PluginComponent {
     // blocked, which is the safe default for a first run with nothing installed.
     property bool whisperBinReady: false
     property bool modelFileReady: false
-    readonly property bool localReady: whisperBinReady && modelFileReady
+    // faster-whisper is "ready" as soon as its command is on PATH — it fetches
+    // its own model when one isn't already downloaded, so there's no local file
+    // that must be present to probe.
+    property bool fasterWhisperReady: false
+
+    // Which backends are installed, in display order — drives the settings
+    // picker and the "nothing installed" messaging.
+    readonly property var availableBackends: {
+        const list = []
+        if (whisperBinReady) list.push("whisper.cpp")
+        if (fasterWhisperReady) list.push("faster-whisper")
+        return list
+    }
+
+    readonly property bool localReady: {
+        if (backend === "faster-whisper")
+            return fasterWhisperReady
+        // whisper.cpp needs both the binary and the model file
+        return whisperBinReady && modelFileReady
+    }
 
     // Human-readable reason the local pipeline can't run yet ("" when ready),
     // shown in the popout and used as the blocked-start error message.
     readonly property string preflightReason: {
         if (localReady)
             return ""
+        if (backend === "faster-whisper")
+            return "faster-whisper not found — install whisper-ctranslate2 (see settings)"
         if (!whisperBinReady && !modelFileReady)
             return "whisper-cli and model not found — check paths in settings"
         if (!whisperBinReady)
@@ -132,6 +167,19 @@ PluginComponent {
         Proc.runCommand("whisperer.preflight.model",
                         ["test", "-r", modelPath],
                         (out, code) => root.modelFileReady = (code === 0))
+        detectBackends()
+    }
+
+    // Probe faster-whisper on PATH so the settings picker can offer it only when
+    // installed. whisper.cpp is covered separately by checkPreflight /
+    // detectWhisperBin (it also needs a model file, not just a binary).
+    function detectBackends() {
+        Proc.runCommand("whisperer.detectBackends",
+                        ["sh", "-c",
+                         "command -v whisper-ctranslate2 >/dev/null 2>&1 && echo fw"],
+                        (out, code) => {
+                            root.fasterWhisperReady = (out || "").indexOf("fw") !== -1
+                        })
     }
 
     // Ask the shell where whisper.cpp lives instead of trusting the stored path.
@@ -194,8 +242,10 @@ PluginComponent {
     }
 
     function loadSettings() {
+        backend = PluginService.loadPluginData(whispererId, "backend", "whisper.cpp")
         whisperBin = PluginService.loadPluginData(whispererId, "whisperBin", home + "/.local/bin/whisper-cli")
         modelPath = PluginService.loadPluginData(whispererId, "modelPath", home + "/.local/share/whisperer/models/ggml-base.en.bin")
+        ctModel = PluginService.loadPluginData(whispererId, "ctModel", "base.en")
         language = PluginService.loadPluginData(whispererId, "language", "en")
         translateToEnglish = PluginService.loadPluginData(whispererId, "translateToEnglish", false)
         typeText = PluginService.loadPluginData(whispererId, "typeText", true)
@@ -732,7 +782,7 @@ PluginComponent {
         case "stopping":
             return "Stopping…"
         case "transcribing":
-            return "Transcribing (" + modelName + ")…"
+            return (translateToEnglish ? "Translating (" : "Transcribing (") + modelName + ")…"
         case "polishing":
             return "Transcribing with AI (" + activeAiModelShort + ")…"
         case "aiError":
@@ -836,19 +886,9 @@ PluginComponent {
 
     Process {
         id: transcriber
-        command: {
-            const cmd = [root.whisperBin,
-                         "-m", root.modelPath,
-                         "-f", root.recordingPath,
-                         "-l", root.language,
-                         "-t", String(root.transcribeThreads),
-                         "--no-timestamps", "--no-prints", "--suppress-nst"]
-            if (root.translateToEnglish)
-                cmd.push("-tr")
-            if (root.vocabPrompt.length > 0)
-                cmd.push("--prompt", root.vocabPrompt, "--carry-initial-prompt")
-            return cmd
-        }
+        command: root.backend === "whisper.cpp"
+                 ? root.whisperCppCommand()
+                 : root.fasterWhisperCommand()
         stdout: StdioCollector {
             id: transcriptOut
             waitForEnd: true
@@ -861,8 +901,57 @@ PluginComponent {
             if (exitCode === 0)
                 root.handleTranscript(transcriptOut.text)
             else
-                root.fail("whisper-cli failed (code " + exitCode + "): " + transcriptErr.text.trim().split("\n").slice(-1)[0])
+                root.fail(root.backend + " failed (code " + exitCode + "): "
+                          + transcriptErr.text.trim().split("\n").slice(-1)[0])
         }
+    }
+
+    // whisper.cpp prints the transcript straight to stdout, which the
+    // StdioCollector above captures directly.
+    function whisperCppCommand() {
+        const cmd = [whisperBin,
+                     "-m", modelPath,
+                     "-f", recordingPath,
+                     "-l", language,
+                     "-t", String(transcribeThreads),
+                     "--no-timestamps", "--no-prints", "--suppress-nst"]
+        if (translateToEnglish)
+            cmd.push("-tr")
+        if (vocabPrompt.length > 0)
+            cmd.push("--prompt", vocabPrompt, "--carry-initial-prompt")
+        return cmd
+    }
+
+    // whisper-ctranslate2 writes the transcript to a .txt file rather than
+    // stdout, so we run it into a scratch dir with its own output discarded,
+    // then cat the .txt back to stdout so the same StdioCollector /
+    // handleTranscript path applies. --language is omitted for "auto" (the tool
+    // auto-detects when the flag is absent; passing "auto" is an error).
+    // int8 on CPU is the whole point of faster-whisper; "auto" picks int8 on CPU
+    // and float16 on GPU. The model is resolved at runtime: prefer the locally
+    // managed directory (fwModelsDir/<name>), else let the tool fetch <name>.
+    function fasterWhisperCommand() {
+        const args = ["whisper-ctranslate2", recordingPath,
+                      "--task", translateToEnglish ? "translate" : "transcribe",
+                      "--output_format", "txt",
+                      "--threads", String(transcribeThreads),
+                      "--device", "auto", "--compute_type", "auto",
+                      "--verbose", "False"]
+        if (language !== "auto")
+            args.push("--language", language)
+        if (vocabPrompt.length > 0)
+            args.push("--initial_prompt", vocabPrompt)
+        // $3.. is the tool invocation; the model flag and --output_dir are
+        // appended so the .txt lands in the scratch dir, then cat'd out. Exit
+        // status is the tool's.
+        const mdir = fwModelsDir + "/" + ctModel
+        const script = 'd=/tmp/whisperer-cli-out; rm -rf "$d"; mkdir -p "$d"; '
+                     + 'mdir="$1"; name="$2"; shift 2; '
+                     + 'if [ -f "$mdir/model.bin" ]; then set -- "$@" --model_directory "$mdir"; '
+                     + 'else set -- "$@" --model "$name"; fi; '
+                     + '"$@" --output_dir "$d" >/dev/null 2>&1; s=$?; '
+                     + 'cat "$d"/*.txt 2>/dev/null; rm -rf "$d"; exit $s'
+        return ["sh", "-c", script, "whisperer", mdir, ctModel].concat(args)
     }
 
     // AI transcription prompt: dictation rules plus the injected custom
