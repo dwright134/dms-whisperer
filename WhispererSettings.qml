@@ -851,7 +851,7 @@ PluginSettings {
         ListSettingWithInput {
             settingKey: "snippets"
             label: "Voice snippets"
-            description: "Speak a trigger phrase on its own and the full text is typed instead of the transcript. Only applies to local (whisper) dictation; the whole dictation must match the trigger, ignoring case and punctuation. Use \\n in the text for a line break."
+            description: "Speak a trigger phrase on its own and the full text is typed instead of the transcript. Works with both local and AI dictation; the whole dictation must match the trigger, ignoring case and punctuation. Use \\n in the text for a line break."
             defaultValue: []
             fields: [
                 {id: "trigger", label: "Trigger phrase", placeholder: "sign off", width: 160, required: true},
