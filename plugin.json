@@ -7,7 +7,7 @@
     "screenshot": "https://raw.githubusercontent.com/dwright134/dms-whisperer/main/docs/popout.png",
     "screenshots": ["https://raw.githubusercontent.com/dwright134/dms-whisperer/main/docs/popout.png"],
     "type": "widget",
-    "capabilities": ["dankbar-widget"],
+    "capabilities": ["dankbar-widget", "ipc"],
     "component": "./Whisperer.qml",
     "icon": "mic",
     "settings": "./WhispererSettings.qml",
