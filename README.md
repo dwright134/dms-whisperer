@@ -78,18 +78,17 @@ Update later with `git -C ~/.config/DankMaterialShell/plugins/whisperer pull`.
    **Settings → Transcription → Local backend** — only installed backends are offered.
 2. **Choose a model** — both whisper.cpp and faster-whisper have a model manager in the settings
    (DMS Settings → Plugins → Whisperer) with download / cached / delete. `base.en` is a good default;
-   `tiny.en` is fastest; `small`/`small.en` are more accurate; pick a multilingual model (`small`) if
-   you dictate in a language other than English or want auto-detect. (faster-whisper also fetches your
-   selected model automatically on first use if you skip the download.)
+   Download one, then click it to make it active. `tiny.en` is fastest; `small`/`small.en` are more
+   accurate; pick a multilingual model (`small`) if you dictate in a language other than English or
+   want auto-detect.
 3. **A keybind** (optional) — Whisperer doesn't claim any global shortcut. Dictation is started by
    **right-clicking the bar mic pill** (quick local toggle), from the **Record** / **AI** buttons
    in the popout (left-click the pill to open it), or via IPC (`dms ipc call whisperer toggle` /
    `toggleAi`). If you want a hotkey, bind those IPC calls to whatever keys are free — see
    [Keybindings](#keybindings).
 
-Until the selected local backend is ready — whisper.cpp needs its binary **and** a model;
-faster-whisper just needs its command on `PATH` — the Record button is disabled and tells you what's
-missing, so nothing records a clip it can't transcribe. (AI mode only needs an API key; local
+Until the selected local backend is ready — each needs its command **and** a downloaded model — the
+Record button is disabled and tells you what's missing, so nothing records a clip it can't transcribe. (AI mode only needs an API key; local
 transcription is just its fallback.)
 
 ## Local backends
@@ -103,11 +102,12 @@ an API key (local transcription is just its fallback) — if you only use AI mod
 | Backend | Command | Model source | Best for |
 |---------|---------|--------------|----------|
 | **whisper.cpp** | `whisper-cli` | Whisperer's model manager (`.bin` files) | GPU builds (Vulkan/CUDA); the built-in downloader |
-| **faster-whisper** | `whisper-ctranslate2` | Whisperer's model manager (or self-downloaded by name) | Fastest on CPU (CTranslate2 int8) |
+| **faster-whisper** | `whisper-ctranslate2` | Whisperer's model manager | Fastest on CPU (CTranslate2 int8) |
 
 whisper.cpp is the default. Both backends have an in-settings model manager (download, cached
-indicator, delete); faster-whisper stores models under `~/.local/share/whisperer/faster-whisper` and
-will also fetch your selected model on first use if you don't pre-download it.
+indicator, delete); whisper.cpp stores `ggml-*.bin` files, faster-whisper stores model directories
+under `~/.local/share/whisperer/faster-whisper`. A model must be downloaded before you can select it —
+neither backend fetches models implicitly.
 
 ### whisper.cpp
 
@@ -157,9 +157,9 @@ sudo dnf install pipx && pipx install whisper-ctranslate2
 ```
 
 Make sure `~/.local/bin` is on your `PATH` so the pipx command is found (`command -v
-whisper-ctranslate2` should print a path). Pick and download a model in **Settings → Transcription →
-Model** (or just select one and it downloads on first use). The plugin runs it with
-`--compute_type auto`, so CPU gets int8 and a CUDA-enabled CTranslate2 uses the GPU automatically.
+whisper-ctranslate2` should print a path). Download a model in **Settings → Transcription → Model**,
+then select it. The plugin runs it with `--compute_type auto`, so CPU gets int8 and a CUDA-enabled
+CTranslate2 uses the GPU automatically.
 
 ## Usage
 
