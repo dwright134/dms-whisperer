@@ -1,8 +1,8 @@
 {
     "id": "whisperer",
     "name": "Whisperer",
-    "description": "Voice dictation: records your voice, transcribes it locally with whisper.cpp, and types the result at the cursor",
-    "version": "0.4.0",
+    "description": "Voice dictation: records your voice, transcribes it locally with whisper.cpp or faster-whisper (or a cloud AI model), and types the result at the cursor",
+    "version": "0.4.1",
     "author": "dwright",
     "screenshot": "https://raw.githubusercontent.com/dwright134/dms-whisperer/main/docs/popout.png",
     "screenshots": ["https://raw.githubusercontent.com/dwright134/dms-whisperer/main/docs/popout.png"],

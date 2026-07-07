@@ -41,9 +41,9 @@ PluginComponent {
     property string backend: "whisper.cpp"
     property string whisperBin: home + "/.local/bin/whisper-cli"
     property string modelPath: home + "/.local/share/whisperer/models/ggml-base.en.bin"
-    // Model size name for faster-whisper. Settings can download it into a
-    // managed directory (fwModelsDir/<name>) which we pass via --model_directory;
-    // if it isn't downloaded there, the tool fetches it into its own cache.
+    // Model size name for faster-whisper. Settings downloads it into a managed
+    // directory (fwModelsDir/<name>) which we pass via --model_directory;
+    // preflight requires it to be present before recording is allowed.
     property string ctModel: "base.en"
     readonly property string fwModelsDir: home + "/.local/share/whisperer/faster-whisper"
     property string language: "en"
@@ -114,10 +114,12 @@ PluginComponent {
     // blocked, which is the safe default for a first run with nothing installed.
     property bool whisperBinReady: false
     property bool modelFileReady: false
-    // faster-whisper is "ready" as soon as its command is on PATH — it fetches
-    // its own model when one isn't already downloaded, so there's no local file
-    // that must be present to probe.
+    // faster-whisper needs its command on PATH *and* the selected model
+    // downloaded into fwModelsDir/<ctModel> (much like whisper.cpp needs its
+    // .bin). Models are managed explicitly in settings — not fetched implicitly
+    // on first use — so both must be present before recording is allowed.
     property bool fasterWhisperReady: false
+    property bool fwModelReady: false
 
     // Which backends are installed, in display order — drives the settings
     // picker and the "nothing installed" messaging.
@@ -130,7 +132,8 @@ PluginComponent {
 
     readonly property bool localReady: {
         if (backend === "faster-whisper")
-            return fasterWhisperReady
+            // needs the binary and the selected model downloaded
+            return fasterWhisperReady && fwModelReady
         // whisper.cpp needs both the binary and the model file
         return whisperBinReady && modelFileReady
     }
@@ -141,7 +144,9 @@ PluginComponent {
         if (localReady)
             return ""
         if (backend === "faster-whisper")
-            return "faster-whisper not found — install whisper-ctranslate2 (see settings)"
+            return !fasterWhisperReady
+                ? "faster-whisper not found — install whisper-ctranslate2 (see settings)"
+                : "faster-whisper model not downloaded — download \"" + ctModel + "\" in settings"
         if (!whisperBinReady && !modelFileReady)
             return "whisper-cli and model not found — check paths in settings"
         if (!whisperBinReady)
@@ -167,6 +172,9 @@ PluginComponent {
         Proc.runCommand("whisperer.preflight.model",
                         ["test", "-r", modelPath],
                         (out, code) => root.modelFileReady = (code === 0))
+        Proc.runCommand("whisperer.preflight.fwmodel",
+                        ["test", "-f", fwModelsDir + "/" + ctModel + "/model.bin"],
+                        (out, code) => root.fwModelReady = (code === 0))
         detectBackends()
     }
 
@@ -928,30 +936,26 @@ PluginComponent {
     // handleTranscript path applies. --language is omitted for "auto" (the tool
     // auto-detects when the flag is absent; passing "auto" is an error).
     // int8 on CPU is the whole point of faster-whisper; "auto" picks int8 on CPU
-    // and float16 on GPU. The model is resolved at runtime: prefer the locally
-    // managed directory (fwModelsDir/<name>), else let the tool fetch <name>.
+    // and float16 on GPU. The model is the locally managed directory
+    // (fwModelsDir/<ctModel>) — preflight guarantees it's downloaded first.
     function fasterWhisperCommand() {
         const args = ["whisper-ctranslate2", recordingPath,
                       "--task", translateToEnglish ? "translate" : "transcribe",
                       "--output_format", "txt",
                       "--threads", String(transcribeThreads),
                       "--device", "auto", "--compute_type", "auto",
+                      "--model_directory", fwModelsDir + "/" + ctModel,
                       "--verbose", "False"]
         if (language !== "auto")
             args.push("--language", language)
         if (vocabPrompt.length > 0)
             args.push("--initial_prompt", vocabPrompt)
-        // $3.. is the tool invocation; the model flag and --output_dir are
-        // appended so the .txt lands in the scratch dir, then cat'd out. Exit
-        // status is the tool's.
-        const mdir = fwModelsDir + "/" + ctModel
+        // $@ is the tool invocation; --output_dir is appended so the .txt lands
+        // in the scratch dir, then cat'd out. Exit status is the tool's.
         const script = 'd=/tmp/whisperer-cli-out; rm -rf "$d"; mkdir -p "$d"; '
-                     + 'mdir="$1"; name="$2"; shift 2; '
-                     + 'if [ -f "$mdir/model.bin" ]; then set -- "$@" --model_directory "$mdir"; '
-                     + 'else set -- "$@" --model "$name"; fi; '
                      + '"$@" --output_dir "$d" >/dev/null 2>&1; s=$?; '
                      + 'cat "$d"/*.txt 2>/dev/null; rm -rf "$d"; exit $s'
-        return ["sh", "-c", script, "whisperer", mdir, ctModel].concat(args)
+        return ["sh", "-c", script, "whisperer"].concat(args)
     }
 
     // AI transcription prompt: dictation rules plus the injected custom
