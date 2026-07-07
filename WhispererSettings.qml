@@ -22,6 +22,73 @@ PluginSettings {
         { name: "medium.en", desc: "Most accurate, slow on this CPU", mb: 1500, bytes: 1528008539 }
     ]
 
+    // Local transcription backends. Descriptions surface the trade-off; the
+    // picker only offers the ones actually installed (detectBackends below).
+    readonly property var backendMeta: ({
+        "whisper.cpp":    { desc: "Local C++ engine. GPU via Vulkan/CUDA if your build supports it, otherwise CPU. Uses the downloadable models below." },
+        "faster-whisper": { desc: "CTranslate2 reimplementation — the fastest option on CPU (int8). Needs the whisper-ctranslate2 command." }
+    })
+    readonly property var backendOrder: ["whisper.cpp", "faster-whisper"]
+
+    // Which backends are on PATH, and where they resolved. Reactive: the
+    // detection list and the picker rebuild when these change. whisper.cpp
+    // counts as present if any of its binary names resolve; its model files are
+    // handled separately below.
+    property var backendAvail: ({ "whisper.cpp": false, "faster-whisper": false })
+    property var backendPath: ({ "whisper.cpp": "", "faster-whisper": "" })
+
+    // The live backend selection, mirrored from the saved value so the
+    // per-backend model UI (the whisper.cpp file manager vs the CLI name
+    // picker) can show/hide reactively.
+    property string currentBackend: "whisper.cpp"
+
+    // Live mirrors of the language / translate-to-English settings, resynced via
+    // onPluginDataChanged, so the English-only-model warning can react without
+    // each SelectionSetting/ToggleSetting exposing its value.
+    property string curLanguage: "en"
+    property bool curTranslate: false
+
+    function loadModelWarningState() {
+        curLanguage = PluginService.loadPluginData(pluginId, "language", "en")
+        curTranslate = PluginService.loadPluginData(pluginId, "translateToEnglish", false)
+    }
+
+    // The local model selected for the active backend, and whether it's an
+    // English-only (.en) build. Those can't transcribe non-English audio or run
+    // the translate task — the most common footgun — so we warn on the combo.
+    readonly property string selectedLocalModel: currentBackend === "faster-whisper"
+        ? fwSelected
+        : activeModelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
+    readonly property bool englishOnlyMismatch:
+        selectedLocalModel.endsWith(".en") && (curLanguage !== "en" || curTranslate)
+
+    // Resolve each backend's binary and remember where it landed, so the
+    // detection list can show exactly what was found and the picker can offer
+    // only what's installed. Emits one "<key>=<path>" line per backend present.
+    function detectBackends() {
+        Proc.runCommand("whisperer.settings.detectBackends",
+                        ["sh", "-c",
+                         "p=$(command -v whisper-cli || command -v whisper-cpp || command -v whisper.cpp); [ -n \"$p\" ] && echo \"cpp=$p\"; "
+                         + "p=$(command -v whisper-ctranslate2); [ -n \"$p\" ] && echo \"fw=$p\"; true"],
+                        (out, code) => {
+                            const keyMap = { "cpp": "whisper.cpp", "fw": "faster-whisper" }
+                            const paths = { "whisper.cpp": "", "faster-whisper": "" }
+                            for (const line of (out || "").split("\n")) {
+                                const i = line.indexOf("=")
+                                if (i === -1)
+                                    continue
+                                const k = keyMap[line.slice(0, i)]
+                                if (k)
+                                    paths[k] = line.slice(i + 1).trim()
+                            }
+                            backendPath = paths
+                            backendAvail = {
+                                "whisper.cpp": paths["whisper.cpp"].length > 0,
+                                "faster-whisper": paths["faster-whisper"].length > 0
+                            }
+                        })
+    }
+
     // Audio-capable OpenRouter models for the AI-transcription dropdown,
     // fetched live from the catalog; static fallback if the fetch fails
     readonly property var aiModelFallback: [
@@ -174,122 +241,403 @@ PluginSettings {
         }
     }
 
-    // whisper.cpp binary: resolved with `command -v` instead of a free-text
-    // path field, so the user never has to know where it landed. The detected
-    // path is saved to the whisperBin key (the plugin reads it and self-detects
-    // too). Falls back to the stored/default path when it's off PATH but present.
-    // Self-loads like SecretSetting so it works nested inside the tab columns.
-    component WhisperBinSetting: Column {
-        id: binSetting
-
-        required property string settingKey
-        required property string label
-        property string description: ""
-        property string defaultValue: ""
-        property string value: defaultValue
-        property bool detecting: false
-        property bool resolved: false
-
+    // Read-only summary of which local engines are installed, shown at the top
+    // of the Transcription card. Reads the paths resolved by detectBackends()
+    // and offers a manual re-scan; the picker below offers whatever's found
+    // here. whisper.cpp's own binary is detected and persisted by the plugin,
+    // so there's nothing to configure — this is purely informational.
+    component BackendDetection: Column {
         width: parent.width
         spacing: Theme.spacingS
 
-        function findSettings() {
-            let item = parent
-            while (item) {
-                if (item.saveValue !== undefined && item.loadValue !== undefined)
-                    return item
-                item = item.parent
+        Item {
+            width: parent.width
+            height: Math.max(detectTitle.implicitHeight, 32)
+
+            StyledText {
+                id: detectTitle
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Detected engines"
+                font.pixelSize: Theme.fontSizeMedium
+                font.weight: Font.Medium
+                color: Theme.surfaceText
             }
-            return null
-        }
 
-        function loadValue() {
-            const settings = findSettings()
-            value = settings ? settings.loadValue(settingKey, defaultValue) : defaultValue
-            detect()
+            DankActionButton {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                iconName: "refresh"
+                tooltipText: "Scan again"
+                buttonSize: 32
+                onClicked: settingsRoot.detectBackends()
+            }
         }
-
-        function detect() {
-            detecting = true
-            Proc.runCommand("whisperer.detectBin",
-                            ["sh", "-c",
-                             "command -v whisper-cli || command -v whisper-cpp || command -v whisper.cpp || " +
-                             "{ [ -x \"$1\" ] && printf '%s\\n' \"$1\"; }",
-                             "sh", binSetting.value],
-                            (out, code) => {
-                                binSetting.detecting = false
-                                const path = (out || "").trim()
-                                binSetting.resolved = (code === 0 && path.length > 0)
-                                if (binSetting.resolved && path !== binSetting.value) {
-                                    binSetting.value = path
-                                    const settings = binSetting.findSettings()
-                                    if (settings)
-                                        settings.saveValue(binSetting.settingKey, path)
-                                }
-                            })
-        }
-
-        Component.onCompleted: Qt.callLater(loadValue)
 
         StyledText {
-            text: binSetting.label
+            width: parent.width
+            text: "Transcription engines found on your PATH — these are the options offered in the picker below."
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.surfaceVariantText
+            wrapMode: Text.WordWrap
+        }
+
+        Repeater {
+            model: settingsRoot.backendOrder
+
+            StyledRect {
+                id: engineRow
+                required property string modelData
+                readonly property bool found: settingsRoot.backendAvail[modelData] === true
+                readonly property string resolvedPath: settingsRoot.backendPath[modelData] || ""
+
+                width: parent.width
+                height: engineText.implicitHeight + Theme.spacingM * 2
+                radius: Theme.cornerRadius
+                color: Theme.surfaceContainerHighest
+
+                DankIcon {
+                    id: engineIcon
+                    anchors.left: parent.left
+                    anchors.leftMargin: Theme.spacingM
+                    anchors.verticalCenter: parent.verticalCenter
+                    name: engineRow.found ? "check_circle" : "cancel"
+                    size: Theme.iconSize - 4
+                    color: engineRow.found ? Theme.primary : Theme.surfaceVariantText
+                }
+
+                Column {
+                    id: engineText
+                    anchors.left: engineIcon.right
+                    anchors.leftMargin: Theme.spacingS
+                    anchors.right: parent.right
+                    anchors.rightMargin: Theme.spacingM
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 1
+
+                    StyledText {
+                        width: parent.width
+                        text: engineRow.modelData
+                        font.pixelSize: Theme.fontSizeMedium
+                        color: Theme.surfaceText
+                    }
+
+                    StyledText {
+                        width: parent.width
+                        text: engineRow.found ? engineRow.resolvedPath : "not installed"
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.surfaceVariantText
+                        elide: Text.ElideMiddle
+                    }
+                }
+            }
+        }
+    }
+
+    // whisper.cpp's downloadable model manager: pick, download, or delete the
+    // ggml model files. Only meaningful for the whisper.cpp backend (the CLI
+    // backends fetch their own models by name), so the Transcription card shows
+    // it only when whisper.cpp is the selected backend.
+    component WhisperCppModels: Column {
+        width: parent.width
+        spacing: Theme.spacingS
+
+        StyledText {
+            text: "Model"
             font.pixelSize: Theme.fontSizeMedium
             font.weight: Font.Medium
             color: Theme.surfaceText
         }
 
         StyledText {
-            text: binSetting.description
+            width: parent.width
+            text: "Download a model, then click it to make it active."
             font.pixelSize: Theme.fontSizeSmall
             color: Theme.surfaceVariantText
-            width: parent.width
             wrapMode: Text.WordWrap
-            visible: binSetting.description !== ""
         }
 
-        StyledRect {
+        Repeater {
+            model: settingsRoot.catalog
+
+            Rectangle {
+                id: modelRow
+                required property var modelData
+
+                readonly property bool installed: settingsRoot.isInstalled(modelData.name)
+                readonly property bool downloading: settingsRoot.isDownloading(modelData.name)
+                readonly property bool active: settingsRoot.modelFullPath(modelData.name) === settingsRoot.activeModelPath
+                readonly property int percent: settingsRoot.shownPercent(modelData.name)
+
+                width: parent.width
+                height: downloading ? 74 : 60
+                radius: Theme.cornerRadius
+                color: active ? Qt.alpha(Theme.primary, 0.12) : Theme.surfaceContainerHigh
+                border.width: active ? 1 : 0
+                border.color: Qt.alpha(Theme.primary, 0.5)
+
+                Behavior on height {
+                    NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                }
+
+                Row {
+                    anchors.left: parent.left
+                    anchors.leftMargin: Theme.spacingM
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenterOffset: modelRow.downloading ? -7 : 0
+                    spacing: Theme.spacingM
+
+                    DankIcon {
+                        name: modelRow.downloading ? "downloading" : (modelRow.active ? "radio_button_checked" : (modelRow.installed ? "radio_button_unchecked" : "cloud_download"))
+                        size: Theme.iconSize
+                        color: (modelRow.active || modelRow.downloading) ? Theme.primary : Theme.surfaceVariantText
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    Column {
+                        spacing: 2
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        StyledText {
+                            text: modelRow.modelData.name + "  ·  " + modelRow.modelData.mb + " MB"
+                            font.pixelSize: Theme.fontSizeMedium
+                            font.weight: modelRow.active ? Font.Medium : Font.Normal
+                            color: Theme.surfaceText
+                        }
+
+                        StyledText {
+                            text: modelRow.downloading
+                                  ? "Downloading… " + modelRow.percent + "% of " + modelRow.modelData.mb + " MB"
+                                  : modelRow.modelData.desc
+                            font.pixelSize: Theme.fontSizeSmall
+                            color: modelRow.downloading ? Theme.primary : Theme.surfaceVariantText
+                        }
+                    }
+                }
+
+                // Download progress bar
+                Rectangle {
+                    visible: modelRow.downloading
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.leftMargin: Theme.spacingM
+                    anchors.rightMargin: Theme.spacingM
+                    anchors.bottomMargin: 8
+                    height: 5
+                    radius: 2.5
+                    color: Qt.alpha(Theme.primary, 0.2)
+
+                    Rectangle {
+                        width: parent.width * modelRow.percent / 100
+                        height: parent.height
+                        radius: parent.radius
+                        color: Theme.primary
+
+                        Behavior on width {
+                            NumberAnimation { duration: 400; easing.type: Easing.OutQuad }
+                        }
+                    }
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: modelRow.installed && !modelRow.active
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: settingsRoot.selectModel(modelRow.modelData)
+                }
+
+                Row {
+                    anchors.right: parent.right
+                    anchors.rightMargin: Theme.spacingS
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenterOffset: modelRow.downloading ? -7 : 0
+                    spacing: Theme.spacingXS
+
+                    DankActionButton {
+                        visible: !modelRow.installed && !modelRow.downloading
+                        iconName: "download"
+                        tooltipText: "Download"
+                        buttonSize: 34
+                        anchors.verticalCenter: parent.verticalCenter
+                        onClicked: settingsRoot.downloadModel(modelRow.modelData)
+                    }
+
+                    DankActionButton {
+                        visible: modelRow.downloading
+                        iconName: "close"
+                        tooltipText: "Cancel download"
+                        buttonSize: 34
+                        anchors.verticalCenter: parent.verticalCenter
+                        onClicked: settingsRoot.cancelDownload(modelRow.modelData)
+                    }
+
+                    DankActionButton {
+                        visible: modelRow.installed && !modelRow.active
+                        iconName: "delete"
+                        tooltipText: "Delete model file"
+                        iconColor: Theme.error
+                        buttonSize: 34
+                        anchors.verticalCenter: parent.verticalCenter
+                        onClicked: settingsRoot.deleteModel(modelRow.modelData)
+                    }
+                }
+            }
+        }
+    }
+
+    // faster-whisper's model manager, mirroring WhisperCppModels: shows which
+    // models are cached locally, downloads/deletes them, and selects the active
+    // one (saved to ctModel). Shown only for the faster-whisper backend.
+    component FasterWhisperModels: Column {
+        width: parent.width
+        spacing: Theme.spacingS
+
+        function loadValue() {
+            settingsRoot.fwRefresh()
+        }
+        Component.onCompleted: loadValue()
+
+        StyledText {
+            text: "Model"
+            font.pixelSize: Theme.fontSizeMedium
+            font.weight: Font.Medium
+            color: Theme.surfaceText
+        }
+
+        StyledText {
             width: parent.width
-            height: Math.max(reDetect.height, statusText.implicitHeight) + Theme.spacingM * 2
-            radius: Theme.cornerRadius
-            color: Theme.surfaceContainerHighest
+            text: "Download a model, then click it to make it active. Stored under ~/.local/share/whisperer/faster-whisper. If you skip this, the tool fetches your selected model into its own cache on first use."
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.surfaceVariantText
+            wrapMode: Text.WordWrap
+        }
 
-            DankIcon {
-                id: statusIcon
-                anchors.left: parent.left
-                anchors.leftMargin: Theme.spacingM
-                anchors.verticalCenter: parent.verticalCenter
-                name: binSetting.detecting ? "hourglass_empty"
-                      : (binSetting.resolved ? "check_circle" : "error")
-                size: Theme.iconSize - 4
-                color: binSetting.detecting ? Theme.surfaceVariantText
-                       : (binSetting.resolved ? Theme.primary : Theme.warning)
-            }
+        Repeater {
+            model: settingsRoot.fwCatalog
 
-            StyledText {
-                id: statusText
-                anchors.left: statusIcon.right
-                anchors.leftMargin: Theme.spacingS
-                anchors.right: reDetect.left
-                anchors.rightMargin: Theme.spacingS
-                anchors.verticalCenter: parent.verticalCenter
-                elide: Text.ElideMiddle
-                text: binSetting.detecting ? "Looking for whisper.cpp…"
-                      : (binSetting.resolved ? binSetting.value
-                         : "whisper.cpp not found on PATH — install it (e.g. whisper-cli)")
-                font.pixelSize: Theme.fontSizeSmall
-                color: binSetting.resolved ? Theme.surfaceText : Theme.surfaceVariantText
-            }
+            Rectangle {
+                id: fwRow
+                required property var modelData
 
-            DankActionButton {
-                id: reDetect
-                anchors.right: parent.right
-                anchors.rightMargin: Theme.spacingS
-                anchors.verticalCenter: parent.verticalCenter
-                iconName: "refresh"
-                tooltipText: "Detect again"
-                buttonSize: 32
-                enabled: !binSetting.detecting
-                onClicked: binSetting.detect()
+                readonly property bool installed: settingsRoot.fwIsInstalled(modelData.name)
+                readonly property bool downloading: settingsRoot.fwIsDownloading(modelData.name)
+                readonly property bool active: settingsRoot.fwSelected === modelData.name
+                readonly property int percent: settingsRoot.fwShownPercent(modelData.name)
+
+                width: parent.width
+                height: downloading ? 74 : 60
+                radius: Theme.cornerRadius
+                color: active ? Qt.alpha(Theme.primary, 0.12) : Theme.surfaceContainerHigh
+                border.width: active ? 1 : 0
+                border.color: Qt.alpha(Theme.primary, 0.5)
+
+                Behavior on height {
+                    NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                }
+
+                Row {
+                    anchors.left: parent.left
+                    anchors.leftMargin: Theme.spacingM
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenterOffset: fwRow.downloading ? -7 : 0
+                    spacing: Theme.spacingM
+
+                    DankIcon {
+                        name: fwRow.downloading ? "downloading" : (fwRow.active ? "radio_button_checked" : (fwRow.installed ? "radio_button_unchecked" : "cloud_download"))
+                        size: Theme.iconSize
+                        color: (fwRow.active || fwRow.downloading) ? Theme.primary : Theme.surfaceVariantText
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    Column {
+                        spacing: 2
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        StyledText {
+                            text: fwRow.modelData.name + "  ·  " + fwRow.modelData.mb + " MB"
+                            font.pixelSize: Theme.fontSizeMedium
+                            font.weight: fwRow.active ? Font.Medium : Font.Normal
+                            color: Theme.surfaceText
+                        }
+
+                        StyledText {
+                            text: fwRow.downloading
+                                  ? "Downloading… " + fwRow.percent + "% of " + fwRow.modelData.mb + " MB"
+                                  : (fwRow.installed ? "Cached — " + fwRow.modelData.desc : fwRow.modelData.desc)
+                            font.pixelSize: Theme.fontSizeSmall
+                            color: fwRow.downloading ? Theme.primary : Theme.surfaceVariantText
+                        }
+                    }
+                }
+
+                // Download progress bar
+                Rectangle {
+                    visible: fwRow.downloading
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.leftMargin: Theme.spacingM
+                    anchors.rightMargin: Theme.spacingM
+                    anchors.bottomMargin: 8
+                    height: 5
+                    radius: 2.5
+                    color: Qt.alpha(Theme.primary, 0.2)
+
+                    Rectangle {
+                        width: parent.width * fwRow.percent / 100
+                        height: parent.height
+                        radius: parent.radius
+                        color: Theme.primary
+
+                        Behavior on width {
+                            NumberAnimation { duration: 400; easing.type: Easing.OutQuad }
+                        }
+                    }
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: fwRow.installed && !fwRow.active
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: settingsRoot.fwSelect(fwRow.modelData)
+                }
+
+                Row {
+                    anchors.right: parent.right
+                    anchors.rightMargin: Theme.spacingS
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenterOffset: fwRow.downloading ? -7 : 0
+                    spacing: Theme.spacingXS
+
+                    DankActionButton {
+                        visible: !fwRow.installed && !fwRow.downloading
+                        iconName: "download"
+                        tooltipText: "Download"
+                        buttonSize: 34
+                        anchors.verticalCenter: parent.verticalCenter
+                        onClicked: settingsRoot.fwDownload(fwRow.modelData)
+                    }
+
+                    DankActionButton {
+                        visible: fwRow.downloading
+                        iconName: "close"
+                        tooltipText: "Cancel download"
+                        buttonSize: 34
+                        anchors.verticalCenter: parent.verticalCenter
+                        onClicked: settingsRoot.fwCancel(fwRow.modelData)
+                    }
+
+                    DankActionButton {
+                        visible: fwRow.installed && !fwRow.downloading
+                        iconName: "delete"
+                        tooltipText: "Delete model files"
+                        iconColor: Theme.error
+                        buttonSize: 34
+                        anchors.verticalCenter: parent.verticalCenter
+                        onClicked: settingsRoot.fwDelete(fwRow.modelData)
+                    }
+                }
             }
         }
     }
@@ -357,6 +705,77 @@ PluginSettings {
                 modelSelect.value = modelSelect.labelToValue[newValue] || newValue
                 settingsRoot.saveValue(modelSelect.settingKey, modelSelect.value)
             }
+        }
+    }
+
+    // Local-backend picker. Options are only the backends detected on PATH,
+    // plus the currently-saved one even if uninstalled (so a removed tool's
+    // selection isn't silently dropped). Mirrors the choice into currentBackend
+    // so the whisper.cpp-only UI can react.
+    component BackendSelect: Column {
+        id: backendSelect
+
+        required property string settingKey
+        property string defaultValue: "whisper.cpp"
+        property string value: defaultValue
+
+        readonly property var options: {
+            const opts = []
+            for (const key of settingsRoot.backendOrder)
+                if (settingsRoot.backendAvail[key] || key === backendSelect.value)
+                    opts.push(key)
+            return opts
+        }
+
+        width: parent.width
+        spacing: Theme.spacingS
+
+        function loadValue() {
+            if (settingsRoot.pluginService) {
+                value = settingsRoot.loadValue(settingKey, defaultValue)
+                settingsRoot.currentBackend = value
+            }
+        }
+
+        Component.onCompleted: {
+            settingsRoot.detectBackends()
+            loadValue()
+        }
+
+        StyledText {
+            text: "Local backend"
+            font.pixelSize: Theme.fontSizeMedium
+            font.weight: Font.Medium
+            color: Theme.surfaceText
+        }
+
+        StyledText {
+            text: settingsRoot.backendMeta[backendSelect.value]
+                  ? settingsRoot.backendMeta[backendSelect.value].desc : ""
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.surfaceVariantText
+            width: parent.width
+            wrapMode: Text.WordWrap
+        }
+
+        DankDropdown {
+            width: parent.width
+            currentValue: backendSelect.value
+            options: backendSelect.options
+            onValueChanged: newValue => {
+                backendSelect.value = newValue
+                settingsRoot.currentBackend = newValue
+                settingsRoot.saveValue(backendSelect.settingKey, newValue)
+            }
+        }
+
+        StyledText {
+            visible: backendSelect.options.length <= 1
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "Install faster-whisper (whisper-ctranslate2) to add the fastest CPU engine — see the README for the command."
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.surfaceVariantText
         }
     }
 
@@ -576,6 +995,156 @@ PluginSettings {
         activeModelPath = modelFullPath(model.name)
     }
 
+    // ── faster-whisper model manager ────────────────────────────────────────
+    // faster-whisper (whisper-ctranslate2) caches its own models by name, but we
+    // manage explicit copies under fwDir so they can be downloaded, selected and
+    // deleted like the whisper.cpp files. The transcriber prefers fwDir/<name>
+    // via --model_directory, falling back to the tool's own fetch when absent.
+    readonly property string fwDir: home + "/.local/share/whisperer/faster-whisper"
+    readonly property string fwHfBase: "https://huggingface.co/Systran/faster-whisper-"
+
+    // model.bin bytes drive the progress bar; the other files are a few MB and
+    // download first. Sizes are the current Systran repo blobs.
+    readonly property var fwCatalog: [
+        { name: "tiny.en",   desc: "Fastest, English",            mb: 75,   bytes: 75537502 },
+        { name: "tiny",      desc: "Fastest, multilingual",       mb: 75,   bytes: 75538270 },
+        { name: "base.en",   desc: "Balanced, English (default)", mb: 145,  bytes: 145216508 },
+        { name: "base",      desc: "Balanced, multilingual",      mb: 145,  bytes: 145217532 },
+        { name: "small.en",  desc: "More accurate, English",      mb: 484,  bytes: 483545366 },
+        { name: "small",     desc: "More accurate, multilingual", mb: 484,  bytes: 483546902 },
+        { name: "medium.en", desc: "Most accurate, English",      mb: 1528, bytes: 1527904330 },
+        { name: "medium",    desc: "Most accurate, multilingual", mb: 1528, bytes: 1527906378 },
+        { name: "large-v3",  desc: "Highest accuracy, slow",      mb: 3087, bytes: 3087284237 }
+    ]
+
+    property var fwInstalled: []          // model names with a local model.bin
+    property var fwDownloadPercent: ({})  // name → percent; -1 = just started
+    property var fwCancelling: ({})
+    property string fwSelected: "base.en" // mirrors the ctModel setting
+
+    function fwModelDir(name) {
+        return fwDir + "/" + name
+    }
+
+    // pgrep/pkill pattern matching this download's shell + curls (their args
+    // carry the "<name>.part" tmp path) but never the probe itself; the ".part"
+    // suffix is a terminator so "base" can't match "base.en"
+    function fwProbe(name) {
+        const base = "faster-whisper/" + name + ".part"
+        return ("[" + base[0] + "]" + base.slice(1)).replace(/\./g, "\\.")
+    }
+
+    function fwIsInstalled(name) {
+        return fwInstalled.indexOf(name) !== -1
+    }
+
+    function fwIsDownloading(name) {
+        return fwDownloadPercent[name] !== undefined
+    }
+
+    function fwShownPercent(name) {
+        return Math.max(0, fwDownloadPercent[name] !== undefined ? fwDownloadPercent[name] : 0)
+    }
+
+    function fwRefresh() {
+        fwSelected = PluginService.loadPluginData(pluginId, "ctModel", "base.en")
+        Proc.runCommand("whisperer.fw.scan",
+                        ["sh", "-c",
+                         "for d in '" + fwDir + "'/*/; do [ -f \"$d/model.bin\" ] && basename \"$d\"; done 2>/dev/null; "
+                         + "for d in '" + fwDir + "'/*.part; do [ -d \"$d\" ] && echo \"PART:$(basename \"$d\" .part)\"; done 2>/dev/null; true"],
+                        (out, code) => {
+                            const installed = []
+                            const parts = []
+                            for (const line of (out || "").trim().split("\n")) {
+                                if (line.length === 0)
+                                    continue
+                                if (line.indexOf("PART:") === 0)
+                                    parts.push(line.slice(5))
+                                else
+                                    installed.push(line)
+                            }
+                            fwInstalled = installed
+                            const updated = Object.assign({}, fwDownloadPercent)
+                            let changed = false
+                            for (const name of parts) {
+                                if (updated[name] === undefined && fwCatalog.some(m => m.name === name)) {
+                                    updated[name] = 0
+                                    changed = true
+                                }
+                            }
+                            if (changed)
+                                fwDownloadPercent = updated
+                        })
+    }
+
+    function fwDownload(model) {
+        const updated = Object.assign({}, fwDownloadPercent)
+        updated[model.name] = -1
+        fwDownloadPercent = updated
+
+        const dir = fwModelDir(model.name)
+        const tmp = dir + ".part"
+        const base = fwHfBase + model.name + "/resolve/main"
+        // Pull the runtime files into a .part dir, then atomically swap in. The
+        // small required files come first; model.bin is last so the progress bar
+        // tracks the dominant download. vocabulary is .txt or .json depending on
+        // the model; preprocessor_config.json exists only for some.
+        const script =
+              'tmp="$1"; base="$2"; dir="$3"; rm -rf "$tmp"; mkdir -p "$tmp" || exit 1; '
+            + 'for f in config.json tokenizer.json model.bin; do '
+            +   'curl -L -sS -f -o "$tmp/$f" "$base/$f" || { rm -rf "$tmp"; exit 1; }; done; '
+            + 'curl -L -sS -f -o "$tmp/vocabulary.txt" "$base/vocabulary.txt" '
+            +   '|| curl -L -sS -f -o "$tmp/vocabulary.json" "$base/vocabulary.json" '
+            +   '|| { rm -rf "$tmp"; exit 1; }; '
+            + 'curl -L -sS -f -o "$tmp/preprocessor_config.json" "$base/preprocessor_config.json" 2>/dev/null || true; '
+            + 'rm -rf "$dir"; mv "$tmp" "$dir"'
+        Proc.runCommand("whisperer.fw.download." + model.name,
+                        ["sh", "-c", script, "whisperer", tmp, base, dir],
+                        (out, code) => {
+                            const done = Object.assign({}, fwDownloadPercent)
+                            delete done[model.name]
+                            fwDownloadPercent = done
+                            const wasCancelled = fwCancelling[model.name] === true
+                            const c = Object.assign({}, fwCancelling)
+                            delete c[model.name]
+                            fwCancelling = c
+                            if (code === 0) {
+                                if (typeof ToastService !== "undefined")
+                                    ToastService.showInfo(model.name + " downloaded")
+                            } else if (!wasCancelled) {
+                                if (typeof ToastService !== "undefined")
+                                    ToastService.showError("Download of " + model.name + " failed")
+                            }
+                            fwRefresh()
+                        },
+                        50, Proc.noTimeout)
+    }
+
+    function fwCancel(model) {
+        const c = Object.assign({}, fwCancelling)
+        c[model.name] = true
+        fwCancelling = c
+        Proc.runCommand("whisperer.fw.cancel." + model.name,
+                        ["sh", "-c", "pkill -f '" + fwProbe(model.name) + "'; rm -rf '" + fwModelDir(model.name) + ".part'"],
+                        (out, code) => {
+                            const done = Object.assign({}, fwDownloadPercent)
+                            delete done[model.name]
+                            fwDownloadPercent = done
+                            fwRefresh()
+                        })
+    }
+
+    function fwDelete(model) {
+        Proc.runCommand("whisperer.fw.delete." + model.name,
+                        ["rm", "-rf", fwModelDir(model.name)],
+                        () => fwRefresh())
+    }
+
+    function fwSelect(model) {
+        PluginService.savePluginData(pluginId, "ctModel", model.name)
+        fwSelected = model.name
+    }
+
     // Filters out non-conversational Gemini variants (TTS, embeddings, image
     // generation, live/native-audio, etc.) that can't do audio->text dictation
     readonly property var googleModelExclude: /(tts|embedding|live|native-audio|image|imagen|veo|aqa|learnlm|robotics|gemma)/
@@ -632,13 +1201,18 @@ PluginSettings {
     Connections {
         target: PluginService
         function onPluginDataChanged(pluginId) {
-            if (pluginId === settingsRoot.pluginId && !settingsRoot.googleModelsLive)
+            if (pluginId !== settingsRoot.pluginId)
+                return
+            settingsRoot.loadModelWarningState()
+            if (!settingsRoot.googleModelsLive)
                 settingsRoot.fetchGoogleModels()
         }
     }
 
     Component.onCompleted: {
         refresh()
+        fwRefresh()
+        loadModelWarningState()
         fetchAiModels()
         fetchGoogleModels()
     }
@@ -696,6 +1270,62 @@ PluginSettings {
         }
     }
 
+    // faster-whisper's counterpart of progressTimer: polls the in-flight
+    // model.bin size in the .part dir. The download shell carries the ".part"
+    // path in its args, so fwProbe matches it for the whole run — no false
+    // orphan during the brief gaps between the small-file curls.
+    Timer {
+        id: fwProgressTimer
+        interval: 500
+        repeat: true
+        running: Object.keys(settingsRoot.fwDownloadPercent).length > 0
+        onTriggered: {
+            for (const name of Object.keys(settingsRoot.fwDownloadPercent)) {
+                const entry = settingsRoot.fwCatalog.find(m => m.name === name)
+                if (!entry)
+                    continue
+                if (settingsRoot.fwDownloadPercent[name] === -1) {
+                    // grace tick: the download shell may not have spawned yet
+                    const updated = Object.assign({}, settingsRoot.fwDownloadPercent)
+                    updated[name] = 0
+                    settingsRoot.fwDownloadPercent = updated
+                    continue
+                }
+                const binPath = settingsRoot.fwModelDir(name) + ".part/model.bin"
+                Proc.runCommand("whisperer.fw.progress." + name,
+                                ["sh", "-c",
+                                 "stat -c %s '" + binPath + "' 2>/dev/null || echo 0; " +
+                                 "pgrep -fc '" + settingsRoot.fwProbe(name) + "' 2>/dev/null || echo 0"],
+                                (out, code) => {
+                                    if (settingsRoot.fwDownloadPercent[name] === undefined)
+                                        return
+                                    const lines = out.trim().split("\n")
+                                    const size = parseInt(lines[0] || "0") || 0
+                                    const alive = (parseInt(lines[1] || "0") || 0) > 0
+                                    if (!alive) {
+                                        // Orphaned .part (shell died mid-download):
+                                        // clean up unless the model actually landed
+                                        const done = Object.assign({}, settingsRoot.fwDownloadPercent)
+                                        delete done[name]
+                                        settingsRoot.fwDownloadPercent = done
+                                        Proc.runCommand("whisperer.fw.orphan." + name,
+                                                        ["sh", "-c",
+                                                         "rm -rf '" + settingsRoot.fwModelDir(name) + ".part'; test -f '" + settingsRoot.fwModelDir(name) + "/model.bin' && echo ok || echo gone"],
+                                                        (res, rc) => {
+                                                            if (res.trim() !== "ok" && typeof ToastService !== "undefined")
+                                                                ToastService.showError(name + " download was interrupted")
+                                                            settingsRoot.fwRefresh()
+                                                        })
+                                        return
+                                    }
+                                    const updated = Object.assign({}, settingsRoot.fwDownloadPercent)
+                                    updated[name] = Math.min(99, Math.round(size / entry.bytes * 100))
+                                    settingsRoot.fwDownloadPercent = updated
+                                })
+            }
+        }
+    }
+
     StyledText {
         width: parent.width
         text: "Right-click the mic in the bar for a quick toggle, left-click it to open the popout and hit Record, or run `dms ipc call whisperer toggle` (bind it to any free key you like), to dictate. Text is typed at the focused cursor when transcription finishes. `dms ipc call whisperer toggleAi` dictates via an AI provider instead (configured below)."
@@ -704,159 +1334,103 @@ PluginSettings {
         wrapMode: Text.WordWrap
     }
 
-    // ── Model manager ──────────────────────────────────────────────────────
+    // ── Transcription ──────────────────────────────────────────────────────
 
     Card {
-        title: "Models"
+        title: "Transcription"
 
-        Column {
+        BackendDetection {}
+
+        BackendSelect {
+            settingKey: "backend"
+            defaultValue: "whisper.cpp"
+        }
+
+        // whisper.cpp downloads and manages its model files locally; the CLI
+        // backends handle their own, so this shows only for whisper.cpp.
+        WhisperCppModels {
+            visible: settingsRoot.currentBackend === "whisper.cpp"
+        }
+
+        // faster-whisper's downloadable model manager (cached indicator +
+        // download/delete), shown when that backend is selected.
+        FasterWhisperModels {
+            visible: settingsRoot.currentBackend !== "whisper.cpp"
+        }
+
+        // English-only (.en) model paired with a non-English language or the
+        // translate toggle: warn, because it silently produces garbage.
+        StyledRect {
+            visible: settingsRoot.englishOnlyMismatch
             width: parent.width
-            spacing: Theme.spacingS
+            height: warnText.implicitHeight + Theme.spacingM * 2
+            radius: Theme.cornerRadius
+            color: Qt.alpha(Theme.warning, 0.15)
 
-            Repeater {
-                model: settingsRoot.catalog
+            DankIcon {
+                id: warnIcon
+                name: "warning"
+                size: Theme.iconSize - 4
+                color: Theme.warning
+                anchors.left: parent.left
+                anchors.leftMargin: Theme.spacingM
+                anchors.verticalCenter: parent.verticalCenter
+            }
 
-                Rectangle {
-                    id: modelRow
-                    required property var modelData
-
-                    readonly property bool installed: settingsRoot.isInstalled(modelData.name)
-                    readonly property bool downloading: settingsRoot.isDownloading(modelData.name)
-                    readonly property bool active: settingsRoot.modelFullPath(modelData.name) === settingsRoot.activeModelPath
-                    readonly property int percent: settingsRoot.shownPercent(modelData.name)
-
-                    width: parent.width
-                    height: downloading ? 74 : 60
-                    radius: Theme.cornerRadius
-                    color: active ? Qt.alpha(Theme.primary, 0.12) : Theme.surfaceContainerHigh
-                    border.width: active ? 1 : 0
-                    border.color: Qt.alpha(Theme.primary, 0.5)
-
-                    Behavior on height {
-                        NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
-                    }
-
-                    Row {
-                        anchors.left: parent.left
-                        anchors.leftMargin: Theme.spacingM
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.verticalCenterOffset: modelRow.downloading ? -7 : 0
-                        spacing: Theme.spacingM
-
-                        DankIcon {
-                            name: modelRow.downloading ? "downloading" : (modelRow.active ? "radio_button_checked" : (modelRow.installed ? "radio_button_unchecked" : "cloud_download"))
-                            size: Theme.iconSize
-                            color: (modelRow.active || modelRow.downloading) ? Theme.primary : Theme.surfaceVariantText
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-
-                        Column {
-                            spacing: 2
-                            anchors.verticalCenter: parent.verticalCenter
-
-                            StyledText {
-                                text: modelRow.modelData.name + "  ·  " + modelRow.modelData.mb + " MB"
-                                font.pixelSize: Theme.fontSizeMedium
-                                font.weight: modelRow.active ? Font.Medium : Font.Normal
-                                color: Theme.surfaceText
-                            }
-
-                            StyledText {
-                                text: modelRow.downloading
-                                      ? "Downloading… " + modelRow.percent + "% of " + modelRow.modelData.mb + " MB"
-                                      : modelRow.modelData.desc
-                                font.pixelSize: Theme.fontSizeSmall
-                                color: modelRow.downloading ? Theme.primary : Theme.surfaceVariantText
-                            }
-                        }
-                    }
-
-                    // Download progress bar
-                    Rectangle {
-                        visible: modelRow.downloading
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.bottom: parent.bottom
-                        anchors.leftMargin: Theme.spacingM
-                        anchors.rightMargin: Theme.spacingM
-                        anchors.bottomMargin: 8
-                        height: 5
-                        radius: 2.5
-                        color: Qt.alpha(Theme.primary, 0.2)
-
-                        Rectangle {
-                            width: parent.width * modelRow.percent / 100
-                            height: parent.height
-                            radius: parent.radius
-                            color: Theme.primary
-
-                            Behavior on width {
-                                NumberAnimation { duration: 400; easing.type: Easing.OutQuad }
-                            }
-                        }
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        enabled: modelRow.installed && !modelRow.active
-                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                        onClicked: settingsRoot.selectModel(modelRow.modelData)
-                    }
-
-                    Row {
-                        anchors.right: parent.right
-                        anchors.rightMargin: Theme.spacingS
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.verticalCenterOffset: modelRow.downloading ? -7 : 0
-                        spacing: Theme.spacingXS
-
-                        DankActionButton {
-                            visible: !modelRow.installed && !modelRow.downloading
-                            iconName: "download"
-                            tooltipText: "Download"
-                            buttonSize: 34
-                            anchors.verticalCenter: parent.verticalCenter
-                            onClicked: settingsRoot.downloadModel(modelRow.modelData)
-                        }
-
-                        DankActionButton {
-                            visible: modelRow.downloading
-                            iconName: "close"
-                            tooltipText: "Cancel download"
-                            buttonSize: 34
-                            anchors.verticalCenter: parent.verticalCenter
-                            onClicked: settingsRoot.cancelDownload(modelRow.modelData)
-                        }
-
-                        DankActionButton {
-                            visible: modelRow.installed && !modelRow.active
-                            iconName: "delete"
-                            tooltipText: "Delete model file"
-                            iconColor: Theme.error
-                            buttonSize: 34
-                            anchors.verticalCenter: parent.verticalCenter
-                            onClicked: settingsRoot.deleteModel(modelRow.modelData)
-                        }
-                    }
-                }
+            StyledText {
+                id: warnText
+                anchors.left: warnIcon.right
+                anchors.leftMargin: Theme.spacingS
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.spacingM
+                anchors.verticalCenter: parent.verticalCenter
+                wrapMode: Text.WordWrap
+                text: "“" + settingsRoot.selectedLocalModel + "” is English-only. Non-English speech and translate-to-English need a multilingual model — pick one without “.en” (e.g. small)."
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.surfaceText
             }
         }
-    }
 
-    // ── Snippets ───────────────────────────────────────────────────────────
-
-    Card {
-        title: "Snippets"
-
-        ListSettingWithInput {
-            settingKey: "snippets"
-            label: "Voice snippets"
-            description: "Speak a trigger phrase on its own and the full text is typed instead of the transcript. Works with both local and AI dictation; the whole dictation must match the trigger, ignoring case and punctuation. Use \\n in the text for a line break."
-            defaultValue: []
-            fields: [
-                {id: "trigger", label: "Trigger phrase", placeholder: "sign off", width: 160, required: true},
-                {id: "text", label: "Text to type", placeholder: "Best regards,\\nDaniel", width: 300, required: true}
+        SelectionSetting {
+            settingKey: "language"
+            label: "Language"
+            description: "Anything other than English requires a multilingual model (e.g. small)"
+            options: [
+                {label: "English", value: "en"},
+                {label: "Auto-detect", value: "auto"},
+                {label: "Spanish", value: "es"},
+                {label: "French", value: "fr"},
+                {label: "German", value: "de"}
             ]
+            defaultValue: "en"
+        }
+
+        ToggleSetting {
+            settingKey: "translateToEnglish"
+            label: "Translate to English"
+            description: "Output the dictation in English instead of the spoken language — whisper's translate task locally, and the AI model is instructed to translate"
+            defaultValue: false
+        }
+
+        ToggleSetting {
+            settingKey: "typeText"
+            label: "Type at cursor"
+            description: "Type the transcript into the focused window using wtype"
+            defaultValue: true
+        }
+
+        ToggleSetting {
+            settingKey: "copyText"
+            label: "Copy to clipboard"
+            description: "Also copy the transcript to the clipboard"
+            defaultValue: true
+        }
+
+        ToggleSetting {
+            settingKey: "soundCues"
+            label: "Sound cues"
+            description: "Play a soft chime when recording starts, finishes, or fails"
+            defaultValue: true
         }
     }
 
@@ -965,6 +1539,33 @@ PluginSettings {
         }
     }
 
+    // ── Snippets & vocabulary ──────────────────────────────────────────────
+
+    Card {
+        title: "Snippets & vocabulary"
+
+        ListSettingWithInput {
+            settingKey: "snippets"
+            label: "Voice snippets"
+            description: "Speak a trigger phrase on its own and the full text is typed instead of the transcript. Works with both local and AI dictation; the whole dictation must match the trigger, ignoring case and punctuation. Use \\n in the text for a line break."
+            defaultValue: []
+            fields: [
+                {id: "trigger", label: "Trigger phrase", placeholder: "sign off", width: 160, required: true},
+                {id: "text", label: "Text to type", placeholder: "Best regards,\\nDaniel", width: 300, required: true}
+            ]
+        }
+
+        ListSettingWithInput {
+            settingKey: "customWords"
+            label: "Custom vocabulary"
+            description: "Names, jargon, and unusual spellings the transcriber should know. Fed to whisper as an initial prompt — keep the list short (a few dozen words) for best effect."
+            defaultValue: []
+            fields: [
+                {id: "word", label: "Word or phrase", placeholder: "DankMaterialShell", width: 280, required: true}
+            ]
+        }
+    }
+
     // ── Recording ──────────────────────────────────────────────────────────
 
     Card {
@@ -1006,68 +1607,4 @@ PluginSettings {
         }
     }
 
-    // ── Transcription ──────────────────────────────────────────────────────
-
-    Card {
-        title: "Transcription"
-
-        ListSettingWithInput {
-            settingKey: "customWords"
-            label: "Custom vocabulary"
-            description: "Names, jargon, and unusual spellings the transcriber should know. Fed to whisper as an initial prompt — keep the list short (a few dozen words) for best effect."
-            defaultValue: []
-            fields: [
-                {id: "word", label: "Word or phrase", placeholder: "DankMaterialShell", width: 280, required: true}
-            ]
-        }
-
-        SelectionSetting {
-            settingKey: "language"
-            label: "Language"
-            description: "Anything other than English requires a multilingual model (e.g. small)"
-            options: [
-                {label: "English", value: "en"},
-                {label: "Auto-detect", value: "auto"},
-                {label: "Spanish", value: "es"},
-                {label: "French", value: "fr"},
-                {label: "German", value: "de"}
-            ]
-            defaultValue: "en"
-        }
-
-        ToggleSetting {
-            settingKey: "translateToEnglish"
-            label: "Translate to English"
-            description: "Output the dictation in English instead of the spoken language — whisper's translate task locally, and the AI model is instructed to translate"
-            defaultValue: false
-        }
-
-        ToggleSetting {
-            settingKey: "typeText"
-            label: "Type at cursor"
-            description: "Type the transcript into the focused window using wtype"
-            defaultValue: true
-        }
-
-        ToggleSetting {
-            settingKey: "copyText"
-            label: "Copy to clipboard"
-            description: "Also copy the transcript to the clipboard"
-            defaultValue: true
-        }
-
-        ToggleSetting {
-            settingKey: "soundCues"
-            label: "Sound cues"
-            description: "Play a soft chime when recording starts, finishes, or fails"
-            defaultValue: true
-        }
-
-        WhisperBinSetting {
-            settingKey: "whisperBin"
-            label: "whisper.cpp binary"
-            description: "Located automatically on your PATH"
-            defaultValue: Quickshell.env("HOME") + "/.local/bin/whisper-cli"
-        }
-    }
 }

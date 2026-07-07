@@ -72,34 +72,47 @@ Update later with `git -C ~/.config/DankMaterialShell/plugins/whisperer pull`.
 
 ### After installing
 
-1. **whisper.cpp binary** — see [below](#whispercpp-binary). The plugin finds it on `PATH`
-   automatically; the settings page shows a ✓ with the detected path (or a warning + re-detect
-   button if it's missing).
-2. **Download a model** — DMS Settings → Plugins → Whisperer → model manager. `base.en` is a good
-   default; `tiny.en` is fastest; `small`/`small.en` are more accurate; pick a multilingual model
-   (`small`) if you dictate in a language other than English or want auto-detect.
+1. **A local backend** — see [Local backends](#local-backends). whisper.cpp is the default and the
+   plugin finds it on `PATH` automatically (the settings page shows a ✓ with the detected path, or a
+   warning + re-detect button). To use faster-whisper instead, install it and pick it under
+   **Settings → Transcription → Local backend** — only installed backends are offered.
+2. **Choose a model** — both whisper.cpp and faster-whisper have a model manager in the settings
+   (DMS Settings → Plugins → Whisperer) with download / cached / delete. `base.en` is a good default;
+   `tiny.en` is fastest; `small`/`small.en` are more accurate; pick a multilingual model (`small`) if
+   you dictate in a language other than English or want auto-detect. (faster-whisper also fetches your
+   selected model automatically on first use if you skip the download.)
 3. **A keybind** (optional) — Whisperer doesn't claim any global shortcut. Dictation is started by
    **right-clicking the bar mic pill** (quick local toggle), from the **Record** / **AI** buttons
    in the popout (left-click the pill to open it), or via IPC (`dms ipc call whisperer toggle` /
    `toggleAi`). If you want a hotkey, bind those IPC calls to whatever keys are free — see
    [Keybindings](#keybindings).
 
-Until a working whisper.cpp binary **and** a model are present, the Record button is disabled and
-tells you what's missing — nothing records a clip it can't transcribe. (AI mode only needs an API
-key; local whisper is just its fallback.)
+Until the selected local backend is ready — whisper.cpp needs its binary **and** a model;
+faster-whisper just needs its command on `PATH` — the Record button is disabled and tells you what's
+missing, so nothing records a clip it can't transcribe. (AI mode only needs an API key; local
+transcription is just its fallback.)
 
-## whisper.cpp binary
+## Local backends
 
-whisper.cpp powers **local** transcription. It's not needed for AI dictation, which runs on a cloud
-provider and only needs an API key (local whisper is just its fallback) — so if you only use AI
-mode, you can skip this entirely.
+Local transcription runs through a **backend** you install yourself — the plugin bundles none of
+them (no binaries, no vendored source). Whisperer auto-detects which are on your `PATH` and lets you
+choose one in **Settings → Transcription → Local backend**; only installed backends appear in the
+picker. None of this is needed for **AI dictation**, which runs on a cloud provider and only needs
+an API key (local transcription is just its fallback) — if you only use AI mode, skip this section.
 
-It's an **external dependency** — this plugin doesn't bundle it (no binary, no vendored source).
-You install whisper.cpp on your system and Whisperer finds it: it looks for the CLI on your `PATH`
-under the names `whisper-cli`, `whisper-cpp`, or `whisper.cpp` (and falls back to a configured path
-if it's off `PATH`).
+| Backend | Command | Model source | Best for |
+|---------|---------|--------------|----------|
+| **whisper.cpp** | `whisper-cli` | Whisperer's model manager (`.bin` files) | GPU builds (Vulkan/CUDA); the built-in downloader |
+| **faster-whisper** | `whisper-ctranslate2` | Whisperer's model manager (or self-downloaded by name) | Fastest on CPU (CTranslate2 int8) |
 
-### Install it
+whisper.cpp is the default. Both backends have an in-settings model manager (download, cached
+indicator, delete); faster-whisper stores models under `~/.local/share/whisperer/faster-whisper` and
+will also fetch your selected model on first use if you don't pre-download it.
+
+### whisper.cpp
+
+Whisperer finds the CLI on your `PATH` under the names `whisper-cli`, `whisper-cpp`, or
+`whisper.cpp` (and falls back to a configured path if it's off `PATH`).
 
 **From your package manager** (simplest — pick what your distro ships):
 
@@ -126,6 +139,28 @@ cp whisper.cpp/build/bin/whisper-cli ~/.local/bin/   # ~/.local/bin is on PATH
 
 (`GGML_NATIVE` is left on — since it's your own machine, `-march=native` is exactly what you want.)
 
+### faster-whisper
+
+The fastest option on CPU. Install the `whisper-ctranslate2` CLI (a drop-in, CTranslate2-backed
+whisper command):
+
+```fish
+# Any distro (recommended) — isolated with pipx
+pipx install whisper-ctranslate2
+
+# Arch
+sudo pacman -S python-pipx && pipx install whisper-ctranslate2
+# Debian/Ubuntu
+sudo apt install pipx && pipx install whisper-ctranslate2
+# Fedora
+sudo dnf install pipx && pipx install whisper-ctranslate2
+```
+
+Make sure `~/.local/bin` is on your `PATH` so the pipx command is found (`command -v
+whisper-ctranslate2` should print a path). Pick and download a model in **Settings → Transcription →
+Model** (or just select one and it downloads on first use). The plugin runs it with
+`--compute_type auto`, so CPU gets int8 and a CUDA-enabled CTranslate2 uses the GPU automatically.
+
 ## Usage
 
 - **Bar pill**: speaker bars (idle) → red pulsing stop icon + elapsed (recording) → waveform +
@@ -149,7 +184,7 @@ The `whisperer` IPC target exposes these functions:
 
 | Function    | What it does                                                                 |
 |-------------|------------------------------------------------------------------------------|
-| `toggle`    | Start/stop **local** dictation (whisper.cpp)                                  |
+| `toggle`    | Start/stop **local** dictation (selected backend)                            |
 | `toggleAi`  | Start/stop **AI** dictation; run mid-recording to upgrade the take to AI mode |
 | `start`     | Start local dictation (no-op if already recording)                           |
 | `startAi`   | Start AI dictation (no-op if already recording)                              |
