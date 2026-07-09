@@ -11,6 +11,9 @@ PluginComponent {
     id: root
 
     readonly property string whispererId: "whisperer"
+    // Unique per-widget instance so Proc.runCommand IDs don't collide when the
+    // plugin is loaded once per output (e.g. multi-monitor setups in Niri/Hyprland).
+    readonly property string instanceId: Math.random().toString(36).substring(2, 9)
     readonly property string home: Quickshell.env("HOME")
     readonly property string recordingPath: "/tmp/whisperer-recording.wav"
     // Records which media players we paused (duck fallback) so we resume only those
@@ -159,7 +162,7 @@ PluginComponent {
     // When the stored binary path doesn't resolve, fall back to locating one on
     // PATH so a fresh install works without the user entering anything.
     function checkPreflight() {
-        Proc.runCommand("whisperer.preflight.bin",
+        Proc.runCommand("whisperer.preflight.bin." + instanceId,
                         ["test", "-x", whisperBin],
                         (out, code) => {
                             if (code === 0) {
@@ -169,10 +172,10 @@ PluginComponent {
                                 root.detectWhisperBin()
                             }
                         })
-        Proc.runCommand("whisperer.preflight.model",
+        Proc.runCommand("whisperer.preflight.model." + instanceId,
                         ["test", "-r", modelPath],
                         (out, code) => root.modelFileReady = (code === 0))
-        Proc.runCommand("whisperer.preflight.fwmodel",
+        Proc.runCommand("whisperer.preflight.fwmodel." + instanceId,
                         ["test", "-f", fwModelsDir + "/" + ctModel + "/model.bin"],
                         (out, code) => root.fwModelReady = (code === 0))
         detectBackends()
@@ -182,7 +185,7 @@ PluginComponent {
     // installed. whisper.cpp is covered separately by checkPreflight /
     // detectWhisperBin (it also needs a model file, not just a binary).
     function detectBackends() {
-        Proc.runCommand("whisperer.detectBackends",
+        Proc.runCommand("whisperer.detectBackends." + instanceId,
                         ["sh", "-c",
                          "command -v whisper-ctranslate2 >/dev/null 2>&1 && echo fw"],
                         (out, code) => {
@@ -195,7 +198,7 @@ PluginComponent {
     // whisper-cpp / whisper.cpp. On a hit we adopt and persist the path — the
     // save flows back through onPluginDataChanged — and mark the binary ready.
     function detectWhisperBin() {
-        Proc.runCommand("whisperer.detectBin",
+        Proc.runCommand("whisperer.detectBin." + instanceId,
                         ["sh", "-c",
                          "command -v whisper-cli || command -v whisper-cpp || command -v whisper.cpp"],
                         (out, code) => {
@@ -282,7 +285,7 @@ PluginComponent {
     // Look a key up from the keyring; if it isn't there but an older build left
     // a plaintext copy in the JSON, migrate that copy into the keyring once.
     function loadApiKey(attr, apply) {
-        Proc.runCommand("whisperer.key.load." + attr,
+        Proc.runCommand("whisperer.key.load." + attr + "." + instanceId,
                         ["secret-tool", "lookup", "service", keyringService, "key", attr],
                         (out, code) => {
                             let key = code === 0 ? out.replace(/\n+$/, "") : ""
@@ -357,7 +360,7 @@ PluginComponent {
             aecModule.running = false
             return
         }
-        Proc.runCommand("whisperer.aec.detect",
+        Proc.runCommand("whisperer.aec.detect." + instanceId,
             ["sh", "-c",
              "pw-cli info 0 >/dev/null 2>&1 || { echo none; exit 0; }; " +
              "for d in /usr/lib/pipewire-0.3 /usr/lib64/pipewire-0.3 /usr/lib/*/pipewire-0.3; do " +
@@ -394,7 +397,7 @@ PluginComponent {
     function ensureAecModule() {
         if (!cancelBackgroundMusic || aecTier !== "aec")
             return
-        Proc.runCommand("whisperer.aec.check",
+        Proc.runCommand("whisperer.aec.check." + instanceId,
             ["sh", "-c",
              "pw-cli ls Node 2>/dev/null | grep -q 'node.name = \"" + aecSourceName + "\"'"],
             (out, code) => {
@@ -558,7 +561,7 @@ PluginComponent {
         doneLingerTimer.restart()
         playCue("error")
         // Discard the partial WAV so it can never be picked up by a later run
-        Proc.runCommand("whisperer.discardRecording",
+        Proc.runCommand("whisperer.discardRecording." + instanceId,
                         ["rm", "-f", recordingPath], () => {})
     }
 
@@ -660,7 +663,7 @@ PluginComponent {
         doneKind = "error"
         doneText = "AI cancelled"
         doneLingerTimer.restart()
-        Proc.runCommand("whisperer.discardRecording",
+        Proc.runCommand("whisperer.discardRecording." + instanceId,
                         ["rm", "-f", recordingPath], () => {})
     }
 
