@@ -1538,70 +1538,19 @@ PluginComponent {
                     topPadding: Theme.spacingXS
 
                     // Fall back to local whisper (disabled if local isn't ready)
-                    Rectangle {
-                        id: useLocalBtn
-                        width: 122
-                        height: 32
-                        radius: 16
+                    DankButton {
+                        text: "Use local"
+                        iconName: "graphic_eq"
+                        buttonHeight: 32
                         enabled: root.localReady
-                        opacity: enabled ? 1 : 0.4
-                        color: localBtnArea.containsMouse ? Qt.darker(Theme.primary, 1.1) : Theme.primary
-
-                        Row {
-                            anchors.centerIn: parent
-                            spacing: Theme.spacingXS
-
-                            DankIcon {
-                                name: "graphic_eq"
-                                size: Theme.iconSize - 6
-                                color: Theme.onPrimary
-                                anchors.verticalCenter: parent.verticalCenter
-                            }
-
-                            StyledText {
-                                text: "Use local"
-                                color: Theme.onPrimary
-                                font.pixelSize: Theme.fontSizeSmall
-                                font.weight: Font.Medium
-                                anchors.verticalCenter: parent.verticalCenter
-                            }
-                        }
-
-                        MouseArea {
-                            id: localBtnArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            enabled: root.localReady
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.fallbackToLocal()
-                        }
+                        onClicked: root.fallbackToLocal()
                     }
 
                     // Discard the recording
-                    Rectangle {
-                        id: cancelBtn
-                        width: 100
-                        height: 32
-                        radius: 16
-                        color: cancelBtnArea.containsMouse ? Theme.surfaceVariant : "transparent"
-                        border.width: 1
-                        border.color: Theme.outline
-
-                        StyledText {
-                            anchors.centerIn: parent
-                            text: "Cancel"
-                            color: Theme.surfaceText
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.weight: Font.Medium
-                        }
-
-                        MouseArea {
-                            id: cancelBtnArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.cancelAiError()
-                        }
+                    DankButton {
+                        text: "Cancel"
+                        buttonHeight: 32
+                        onClicked: root.cancelAiError()
                     }
                 }
             }
@@ -1728,7 +1677,6 @@ PluginComponent {
                         DankButton {
                             text: root.sttState === "recording" ? "Stop" : "Record"
                             iconName: root.sttState === "recording" ? "stop" : "mic"
-                            backgroundColor: root.sttState === "recording" ? Theme.error : Theme.primary
                             buttonHeight: 36
                             // Local dictation needs the whisper pipeline; Stop is
                             // always allowed so an in-flight recording can end.
