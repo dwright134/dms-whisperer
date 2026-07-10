@@ -306,3 +306,7 @@ qs list --all                      # find the shell instance
 qs log -i <instance-id> | grep -i whisperer
 dms ipc call whisperer status
 ```
+
+## License
+
+[MIT](LICENSE) © Daniel Wright
