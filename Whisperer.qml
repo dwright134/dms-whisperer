@@ -57,9 +57,10 @@ PluginComponent {
     readonly property string fwModelsDir: home + "/.local/share/whisperer/faster-whisper"
     // Base URL of a running whisper-server (whisper.cpp's HTTP server) for the
     // "whisper-server" backend. The server keeps the model loaded between
-    // dictations, so each request skips the per-run model-load cost. Model,
-    // threads, and GPU are fixed at server startup — only per-utterance options
-    // (language, translate, prompt) are sent with each request.
+    // dictations, so each request skips the per-run model-load cost. Threads
+    // and GPU are fixed at server startup; the model is hot-swapped from the
+    // settings model manager (POST /load), and each request carries only the
+    // per-utterance options (language, translate, prompt).
     property string serverUrl: "http://127.0.0.1:8910"
     property string language: "en"
     property bool translateToEnglish: false
@@ -116,12 +117,10 @@ PluginComponent {
     readonly property string activeAiModelShort: activeAiModel.split("/").pop()
 
     // Name shown in the "Transcribing (…)" status. faster-whisper is driven by
-    // ctModel; whisper.cpp derives it from the model file it loads. The server
-    // loads its own model at startup, which the plugin can't inspect.
+    // ctModel; whisper.cpp and whisper-server both derive it from modelPath
+    // (selecting a model in settings hot-swaps the server to that file).
     readonly property string modelName: backend === "faster-whisper"
         ? ctModel
-        : backend === "whisper-server"
-        ? "server"
         : modelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
 
     // Whisper pre-flight: a local transcription needs both the whisper-cli

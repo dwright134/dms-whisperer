@@ -27,7 +27,7 @@ PluginSettings {
     readonly property var backendMeta: ({
         "whisper.cpp":    { desc: "Local C++ engine. GPU via Vulkan/CUDA if your build supports it, otherwise CPU. Uses the downloadable models below." },
         "faster-whisper": { desc: "CTranslate2 reimplementation — the fastest option on CPU (int8). Needs the whisper-ctranslate2 command." },
-        "whisper-server": { desc: "A running whisper-server keeps the model loaded in RAM, so every dictation skips the model-load delay. Model, threads, and GPU are fixed when the server starts — see the README for setup." }
+        "whisper-server": { desc: "A running whisper-server keeps the model loaded in RAM, so every dictation skips the model-load delay. Threads and GPU are fixed when the server starts; models hot-swap from the list below. See the README for setup." }
     })
     readonly property var backendOrder: ["whisper.cpp", "faster-whisper", "whisper-server"]
 
@@ -57,12 +57,10 @@ PluginSettings {
     // The local model selected for the active backend, and whether it's an
     // English-only (.en) build. Those can't transcribe non-English audio or run
     // the translate task — the most common footgun — so we warn on the combo.
-    // The server's model is chosen at its startup and can't be inspected from
-    // here, so no warning is possible for whisper-server.
+    // whisper-server shares modelPath with whisper.cpp (selecting a model
+    // hot-swaps the server to it), so the same warning applies.
     readonly property string selectedLocalModel: currentBackend === "faster-whisper"
         ? fwSelected
-        : currentBackend === "whisper-server"
-        ? ""
         : activeModelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
     readonly property bool englishOnlyMismatch:
         selectedLocalModel.endsWith(".en") && (curLanguage !== "en" || curTranslate)
@@ -396,7 +394,9 @@ PluginSettings {
 
         StyledText {
             width: parent.width
-            text: "Download a model, then click it to make it active."
+            text: settingsRoot.currentBackend === "whisper-server"
+                  ? "Download a model, then click it to load it into the running server. The server's startup default (-m in its systemd unit) is updated to match, so a restart keeps the choice."
+                  : "Download a model, then click it to make it active."
             font.pixelSize: Theme.fontSizeSmall
             color: Theme.surfaceVariantText
             wrapMode: Text.WordWrap
@@ -1038,8 +1038,48 @@ PluginSettings {
     }
 
     function selectModel(model) {
+        if (currentBackend === "whisper-server") {
+            serverLoadModel(model)
+            return
+        }
         PluginService.savePluginData(pluginId, "modelPath", modelFullPath(model.name))
         activeModelPath = modelFullPath(model.name)
+    }
+
+    // whisper-server model swap: POST /load blocks until the new model is
+    // loaded, so a 200 means it's live — only then is the choice persisted
+    // (modelPath is shared with the whisper.cpp backend, so switching between
+    // the two keeps the same model). The systemd unit's -m flag is then pointed
+    // at the same file so a server restart comes back with it; a server run
+    // outside systemd (no unit file, or no -m in it) just skips that step and
+    // keeps its own startup default. A failed load leaves the previous model
+    // loaded server-side and the previous selection here.
+    function serverLoadModel(model) {
+        const path = modelFullPath(model.name)
+        const url = PluginService.loadPluginData(pluginId, "serverUrl", "http://127.0.0.1:8910")
+        Proc.runCommand("whisperer.settings.serverLoad",
+                        ["sh", "-c",
+                         // The -m flag can sit on an ExecStart continuation
+                         // line, so match it on any non-comment line rather
+                         // than anchoring to ExecStart= itself.
+                         'curl -sf --max-time 300 -F "model=$1" "$2/load" >/dev/null || exit 1; '
+                         + 'u="$HOME/.config/systemd/user/whisper-server.service"; '
+                         + '[ -f "$u" ] || exit 0; '
+                         + 'grep -vE "^[[:space:]]*#" "$u" | grep -qE "(^|[[:space:]])(-m|--model)[[:space:]]" || exit 0; '
+                         + 'sed -i -E "/^[[:space:]]*#/! s#(^|[[:space:]])(-m|--model)[[:space:]]+[^[:space:]]+#\\1-m $1#" "$u" '
+                         + '&& systemctl --user daemon-reload; exit 0',
+                         "sh", path, url],
+                        (out, code) => {
+                            if (code === 0) {
+                                PluginService.savePluginData(pluginId, "modelPath", path)
+                                activeModelPath = path
+                                if (typeof ToastService !== "undefined")
+                                    ToastService.showInfo(model.name + " loaded into whisper-server")
+                            } else if (typeof ToastService !== "undefined") {
+                                ToastService.showError("whisper-server didn't load " + model.name + " — is the server running?")
+                            }
+                            detectBackends()
+                        })
     }
 
     // ── faster-whisper model manager ────────────────────────────────────────
@@ -1420,15 +1460,17 @@ PluginSettings {
             visible: settingsRoot.currentBackend === "whisper-server"
             settingKey: "serverUrl"
             label: "Server URL"
-            description: "Base URL of the running whisper-server. Model, CPU threads, and GPU are set by the server's own startup flags — language, translate, and vocabulary still apply per dictation. After starting or stopping the server, hit the rescan button above."
+            description: "Base URL of the running whisper-server. CPU threads and GPU are set by the server's own startup flags — language, translate, vocabulary, and the model picked below still apply. After starting or stopping the server, hit the rescan button above."
             placeholder: "http://127.0.0.1:8910"
             defaultValue: "http://127.0.0.1:8910"
         }
 
-        // whisper.cpp downloads and manages its model files locally; the CLI
-        // backends handle their own, so this shows only for whisper.cpp.
+        // The ggml model manager serves both whisper.cpp (click = set the CLI's
+        // model) and whisper-server (click = hot-swap via POST /load) — the two
+        // share the same model files and the same modelPath selection.
         WhisperCppModels {
             visible: settingsRoot.currentBackend === "whisper.cpp"
+                     || settingsRoot.currentBackend === "whisper-server"
         }
 
         // faster-whisper's downloadable model manager (cached indicator +

@@ -103,13 +103,14 @@ an API key (local transcription is just its fallback) — if you only use AI mod
 |---------|---------|--------------|----------|
 | **whisper.cpp** | `whisper-cli` | Whisperer's model manager (`.bin` files) | GPU builds (Vulkan/CUDA); the built-in downloader |
 | **faster-whisper** | `whisper-ctranslate2` | Whisperer's model manager | Fastest on CPU (CTranslate2 int8) |
-| **whisper-server** | `whisper-server` (running) | The server's `-m` startup flag | Lowest latency — the model stays loaded between dictations |
+| **whisper-server** | `whisper-server` (running) | Whisperer's model manager (shared with whisper.cpp) | Lowest latency — the model stays loaded between dictations |
 
-whisper.cpp is the default. The two CLI backends have an in-settings model manager (download, cached
-indicator, delete); whisper.cpp stores `ggml-*.bin` files, faster-whisper stores model directories
-under `~/.local/share/whisperer/faster-whisper`. A model must be downloaded before you can select it —
-neither backend fetches models implicitly. whisper-server brings its own model (loaded once at server
-startup), so no model manager is shown for it.
+whisper.cpp is the default. Every backend has an in-settings model manager (download, cached
+indicator, delete); whisper.cpp and whisper-server share the same `ggml-*.bin` files, faster-whisper
+stores model directories under `~/.local/share/whisperer/faster-whisper`. A model must be downloaded
+before you can select it — no backend fetches models implicitly. For whisper-server, clicking a
+model hot-swaps it into the running server (`POST /load`) and updates the server's startup default,
+so the choice survives restarts.
 
 ### whisper.cpp
 
@@ -186,17 +187,18 @@ ninja -C whisper.cpp/build whisper-server
 cp whisper.cpp/build/bin/whisper-server ~/.local/bin/
 ```
 
-Run it with the model and tuning you want — these are fixed for the server's lifetime (language,
-translate, and custom vocabulary still apply per dictation):
+Run it with the threads/GPU tuning you want — those are fixed for the server's lifetime, while
+language, translate, and custom vocabulary apply per dictation, and the model can be swapped live
+from Whisperer's model manager:
 
 ```fish
 whisper-server -m ~/.local/share/whisperer/models/ggml-small.bin -ng -t 6 \
   --host 127.0.0.1 --port 8910
 ```
 
-(`-ng` forces CPU; drop it for a GPU build with a capable card. Models downloaded by Whisperer's
-whisper.cpp model manager live in `~/.local/share/whisperer/models/`, so the two backends can share
-them.) To have it always running, wrap that command in a systemd user service:
+(`-ng` forces CPU; drop it for a GPU build with a capable card. The server and the whisper.cpp
+backend share the models in `~/.local/share/whisperer/models/`.) To have it always running, wrap
+that command in a systemd user service:
 
 ```ini
 # ~/.config/systemd/user/whisper-server.service
@@ -219,9 +221,12 @@ systemctl --user daemon-reload && systemctl --user enable --now whisper-server
 Then pick **whisper-server** under **Settings → Transcription → Local backend** (it appears once the
 server answers its health probe — hit the rescan button after starting it) and set the **Server
 URL** if you changed the port. The model stays resident while the server runs (~600 MB for `small`).
-To switch models without restarting, POST to `/load`:
-`curl -F model=$HOME/.local/share/whisperer/models/ggml-base.en.bin http://127.0.0.1:8910/load` —
-but note the server reverts to its `-m` model on restart.
+
+**Switching models**: click a downloaded model in the settings model manager — it's hot-swapped into
+the running server (`POST /load`, a second or two) and the unit file's `-m` flag is rewritten (plus
+`daemon-reload`) so the server comes back with the same model after a restart. If the server runs
+outside systemd (no `~/.config/systemd/user/whisper-server.service`), the live swap still works but
+the startup default stays whatever your own command says.
 
 ## Usage
 
@@ -315,8 +320,9 @@ Mod+Shift+A { spawn "dms" "ipc" "call" "whisperer" "toggleAi"; }
   thread count) and, for whisper.cpp, a **Use GPU (Vulkan/CUDA)** toggle. The toggle only
   appears when the detected `whisper-cli` was actually built with a GPU backend, and is off by
   default (it adds `--no-gpu`) — integrated GPUs are frequently slower than the CPU, so benchmark
-  before enabling. Neither applies to whisper-server, whose threads/GPU/model are fixed by its
-  own startup flags; it gets a **Server URL** field instead.
+  before enabling. Neither applies to whisper-server, whose threads/GPU are fixed by its own
+  startup flags; it gets a **Server URL** field instead, and model clicks hot-swap the running
+  server.
 - **Voice snippets**: define trigger phrase → full text pairs. The expansion is typed when the
   *entire* dictation matches a trigger (ignoring case/punctuation, in both local and AI mode) —
   triggers inside longer sentences are left alone. `\n` in the expansion becomes a real line break.
