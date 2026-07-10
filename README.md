@@ -139,6 +139,13 @@ cp whisper.cpp/build/bin/whisper-cli ~/.local/bin/   # ~/.local/bin is on PATH
 
 (`GGML_NATIVE` is left on — since it's your own machine, `-march=native` is exactly what you want.)
 
+**For a GPU build**, drop `-DBUILD_SHARED_LIBS=OFF` and add the backend flag — `-DGGML_VULKAN=ON`
+(Vulkan) or `-DGGML_CUDA=ON` (CUDA) — plus that backend's dev packages (e.g. Vulkan headers +
+`shaderc`/`spirv-headers`, or the CUDA toolkit). The resulting binary links backend `.so` files, so
+keep them alongside it (or set an rpath). When Whisperer detects a GPU-capable `whisper-cli`, the
+**Use GPU** toggle appears under the backend picker. Note that a weak/integrated GPU is often slower
+than the CPU path, so it's off by default — benchmark before leaving it on.
+
 ### faster-whisper
 
 The fastest option on CPU. Install the `whisper-ctranslate2` CLI (a drop-in, CTranslate2-backed
@@ -248,6 +255,12 @@ Mod+Shift+A { spawn "dms" "ipc" "call" "whisperer" "toggleAi"; }
   Spanish, French, German — non-English needs a multilingual model), and optionally translate the
   output to English: locally via whisper's translate task (`-tr`), and in AI mode the model is
   instructed to translate instead of preserving the spoken language.
+- **Backend tuning**: under the local-backend picker, a **CPU threads** slider (drives
+  whisper.cpp `-t` and faster-whisper `--threads`, with its maximum capped to the machine's
+  thread count) and, for whisper.cpp, a **Use GPU (Vulkan/CUDA)** toggle. The toggle only
+  appears when the detected `whisper-cli` was actually built with a GPU backend, and is off by
+  default (it adds `--no-gpu`) — integrated GPUs are frequently slower than the CPU, so benchmark
+  before enabling.
 - **Voice snippets**: define trigger phrase → full text pairs. The expansion is typed when the
   *entire* dictation matches a trigger (ignoring case/punctuation, in both local and AI mode) —
   triggers inside longer sentences are left alone. `\n` in the expansion becomes a real line break.

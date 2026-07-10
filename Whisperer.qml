@@ -19,8 +19,9 @@ PluginComponent {
     // Records which media players we paused (duck fallback) so we resume only those
     readonly property string duckMarkerPath: "/tmp/whisperer-ducked"
     readonly property int maxRecordSeconds: 300
-    // whisper-cli CPU threads (-t)
-    readonly property int transcribeThreads: 4
+    // whisper-cli CPU threads (-t). User-configurable in settings, capped there
+    // to the machine's thread count; 0/unset falls back to 4.
+    property int transcribeThreads: 4
     // Peak level below this is treated as silence and never sent to whisper,
     // avoiding hallucinated transcripts ("Thank you." etc.) being typed
     readonly property real silenceThresholdDb: -40
@@ -44,6 +45,11 @@ PluginComponent {
     property string backend: "whisper.cpp"
     property string whisperBin: home + "/.local/bin/whisper-cli"
     property string modelPath: home + "/.local/share/whisperer/models/ggml-base.en.bin"
+    // Offload whisper.cpp inference to the GPU (Vulkan/CUDA) when the binary was
+    // built with GPU support. Off by default: it only helps with a capable
+    // discrete GPU — integrated GPUs are typically slower than the CPU path.
+    // When off we pass --no-gpu so a GPU-enabled build stays deterministic.
+    property bool whisperUseGpu: false
     // Model size name for faster-whisper. Settings downloads it into a managed
     // directory (fwModelsDir/<name>) which we pass via --model_directory;
     // preflight requires it to be present before recording is allowed.
@@ -256,6 +262,8 @@ PluginComponent {
         backend = PluginService.loadPluginData(whispererId, "backend", "whisper.cpp")
         whisperBin = PluginService.loadPluginData(whispererId, "whisperBin", home + "/.local/bin/whisper-cli")
         modelPath = PluginService.loadPluginData(whispererId, "modelPath", home + "/.local/share/whisperer/models/ggml-base.en.bin")
+        whisperUseGpu = PluginService.loadPluginData(whispererId, "whisperUseGpu", false)
+        transcribeThreads = PluginService.loadPluginData(whispererId, "transcribeThreads", 4)
         ctModel = PluginService.loadPluginData(whispererId, "ctModel", "base.en")
         language = PluginService.loadPluginData(whispererId, "language", "en")
         translateToEnglish = PluginService.loadPluginData(whispererId, "translateToEnglish", false)
@@ -926,6 +934,8 @@ PluginComponent {
                      "-l", language,
                      "-t", String(transcribeThreads),
                      "--no-timestamps", "--no-prints", "--suppress-nst"]
+        if (!whisperUseGpu)
+            cmd.push("--no-gpu")
         if (translateToEnglish)
             cmd.push("-tr")
         if (vocabPrompt.length > 0)

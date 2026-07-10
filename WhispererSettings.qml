@@ -62,6 +62,38 @@ PluginSettings {
     readonly property bool englishOnlyMismatch:
         selectedLocalModel.endsWith(".en") && (curLanguage !== "en" || curTranslate)
 
+    // Hardware thread count, so the CPU-threads slider can't be pushed past what
+    // the machine actually has. Falls back to 4 if nproc is unavailable.
+    property int cpuThreads: 4
+    function detectCpuThreads() {
+        Proc.runCommand("whisperer.settings.nproc",
+                        ["sh", "-c", "nproc 2>/dev/null || echo 4"],
+                        (out, code) => {
+                            const n = parseInt((out || "").trim(), 10)
+                            if (!isNaN(n) && n > 0)
+                                cpuThreads = n
+                        })
+    }
+
+    // Whether the resolved whisper-cli was built with a GPU backend. A CPU-only
+    // build ignores GPU flags entirely, so the "Use GPU" toggle only makes sense
+    // when a Vulkan/CUDA/HIP/SYCL backend is linked into the binary. Detected via
+    // ldd's (transitive) dependency list — the one signal that's specific to this
+    // binary rather than to whatever else shares its lib directory.
+    property bool whisperGpuCapable: false
+    function detectWhisperGpu() {
+        Proc.runCommand("whisperer.settings.gpucap",
+                        ["sh", "-c",
+                         "b=$(command -v whisper-cli || command -v whisper-cpp || command -v whisper.cpp); "
+                         + "[ -z \"$b\" ] && { echo no; exit 0; }; "
+                         + "ldd \"$(readlink -f \"$b\")\" 2>/dev/null "
+                         + "| grep -qiE 'libggml-(vulkan|cuda|hip|rocm|sycl)|libvulkan|libcudart|libcuda\\.|libamdhip' "
+                         + "&& echo yes || echo no"],
+                        (out, code) => {
+                            whisperGpuCapable = (out || "").trim() === "yes"
+                        })
+    }
+
     // Resolve each backend's binary and remember where it landed, so the
     // detection list can show exactly what was found and the picker can offer
     // only what's installed. Emits one "<key>=<path>" line per backend present.
@@ -739,6 +771,8 @@ PluginSettings {
 
         Component.onCompleted: {
             settingsRoot.detectBackends()
+            settingsRoot.detectCpuThreads()
+            settingsRoot.detectWhisperGpu()
             loadValue()
         }
 
@@ -1344,6 +1378,24 @@ PluginSettings {
         BackendSelect {
             settingKey: "backend"
             defaultValue: "whisper.cpp"
+        }
+
+        ToggleSetting {
+            visible: settingsRoot.currentBackend === "whisper.cpp" && settingsRoot.whisperGpuCapable
+            settingKey: "whisperUseGpu"
+            label: "Use GPU (Vulkan/CUDA)"
+            description: "Offload transcription to the GPU. Integrated GPUs are often slower than the CPU, so benchmark before leaving it on. Off adds --no-gpu."
+            defaultValue: false
+        }
+
+        SliderSetting {
+            settingKey: "transcribeThreads"
+            label: "CPU threads"
+            description: "CPU threads for local transcription (whisper.cpp -t / faster-whisper --threads). Capped at this machine's " + settingsRoot.cpuThreads + " hardware threads."
+            minimum: 1
+            maximum: settingsRoot.cpuThreads
+            defaultValue: Math.min(4, settingsRoot.cpuThreads)
+            unit: ""
         }
 
         // whisper.cpp downloads and manages its model files locally; the CLI
