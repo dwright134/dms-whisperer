@@ -55,6 +55,12 @@ PluginComponent {
     // preflight requires it to be present before recording is allowed.
     property string ctModel: "base.en"
     readonly property string fwModelsDir: home + "/.local/share/whisperer/faster-whisper"
+    // Base URL of a running whisper-server (whisper.cpp's HTTP server) for the
+    // "whisper-server" backend. The server keeps the model loaded between
+    // dictations, so each request skips the per-run model-load cost. Model,
+    // threads, and GPU are fixed at server startup — only per-utterance options
+    // (language, translate, prompt) are sent with each request.
+    property string serverUrl: "http://127.0.0.1:8910"
     property string language: "en"
     property bool translateToEnglish: false
     property bool typeText: true
@@ -110,9 +116,12 @@ PluginComponent {
     readonly property string activeAiModelShort: activeAiModel.split("/").pop()
 
     // Name shown in the "Transcribing (…)" status. faster-whisper is driven by
-    // ctModel; whisper.cpp derives it from the model file it loads.
+    // ctModel; whisper.cpp derives it from the model file it loads. The server
+    // loads its own model at startup, which the plugin can't inspect.
     readonly property string modelName: backend === "faster-whisper"
         ? ctModel
+        : backend === "whisper-server"
+        ? "server"
         : modelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
 
     // Whisper pre-flight: a local transcription needs both the whisper-cli
@@ -129,6 +138,10 @@ PluginComponent {
     // on first use — so both must be present before recording is allowed.
     property bool fasterWhisperReady: false
     property bool fwModelReady: false
+    // whisper-server answered its /health probe. Unlike the CLI backends this
+    // can flip while the widget is idle (the server can be stopped/started any
+    // time), so it's re-probed by every checkPreflight() pass.
+    property bool whisperServerReady: false
 
     // Which backends are installed, in display order — drives the settings
     // picker and the "nothing installed" messaging.
@@ -136,6 +149,7 @@ PluginComponent {
         const list = []
         if (whisperBinReady) list.push("whisper.cpp")
         if (fasterWhisperReady) list.push("faster-whisper")
+        if (whisperServerReady) list.push("whisper-server")
         return list
     }
 
@@ -143,6 +157,9 @@ PluginComponent {
         if (backend === "faster-whisper")
             // needs the binary and the selected model downloaded
             return fasterWhisperReady && fwModelReady
+        if (backend === "whisper-server")
+            // the server bundles its own model; reachable == ready
+            return whisperServerReady
         // whisper.cpp needs both the binary and the model file
         return whisperBinReady && modelFileReady
     }
@@ -156,6 +173,8 @@ PluginComponent {
             return !fasterWhisperReady
                 ? "faster-whisper not found — install whisper-ctranslate2 (see settings)"
                 : "faster-whisper model not downloaded — download \"" + ctModel + "\" in settings"
+        if (backend === "whisper-server")
+            return "whisper-server not reachable at " + serverUrl + " — start it (see README)"
         if (!whisperBinReady && !modelFileReady)
             return "whisper-cli and model not found — check paths in settings"
         if (!whisperBinReady)
@@ -184,6 +203,12 @@ PluginComponent {
         Proc.runCommand("whisperer.preflight.fwmodel." + instanceId,
                         ["test", "-f", fwModelsDir + "/" + ctModel + "/model.bin"],
                         (out, code) => root.fwModelReady = (code === 0))
+        // /health answers 200 only once the server's model is loaded (503 while
+        // loading), so -f covers both "not running" and "not ready yet".
+        Proc.runCommand("whisperer.preflight.server." + instanceId,
+                        ["curl", "-sf", "--max-time", "2", "-o", "/dev/null",
+                         serverUrl + "/health"],
+                        (out, code) => root.whisperServerReady = (code === 0))
         detectBackends()
     }
 
@@ -265,6 +290,7 @@ PluginComponent {
         whisperUseGpu = PluginService.loadPluginData(whispererId, "whisperUseGpu", false)
         transcribeThreads = PluginService.loadPluginData(whispererId, "transcribeThreads", 4)
         ctModel = PluginService.loadPluginData(whispererId, "ctModel", "base.en")
+        serverUrl = PluginService.loadPluginData(whispererId, "serverUrl", "http://127.0.0.1:8910")
         language = PluginService.loadPluginData(whispererId, "language", "en")
         translateToEnglish = PluginService.loadPluginData(whispererId, "translateToEnglish", false)
         typeText = PluginService.loadPluginData(whispererId, "typeText", true)
@@ -907,6 +933,8 @@ PluginComponent {
         id: transcriber
         command: root.backend === "whisper.cpp"
                  ? root.whisperCppCommand()
+                 : root.backend === "whisper-server"
+                 ? root.whisperServerCommand()
                  : root.fasterWhisperCommand()
         stdout: StdioCollector {
             id: transcriptOut
@@ -969,6 +997,32 @@ PluginComponent {
                      + '"$@" --output_dir "$d" >/dev/null 2>&1; s=$?; '
                      + 'cat "$d"/*.txt 2>/dev/null; rm -rf "$d"; exit $s'
         return ["sh", "-c", script, "whisperer"].concat(args)
+    }
+
+    // whisper-server does the same inference as whisper-cli but keeps the model
+    // loaded between requests, so this only ships the recording and the
+    // per-utterance options; model/threads/GPU were fixed when the server
+    // started. The transcript comes back as the plain-text response body, which
+    // lands on curl's stdout — same StdioCollector path as whisper.cpp. -f maps
+    // HTTP errors to curl exit 22 so the onExited error path fires; the connect
+    // timeout fails fast if the server died since the last preflight probe.
+    // --form-string (not -F) for the option fields so values are passed verbatim
+    // (with -F, curl would interpret @, < and ;type= inside the content).
+    function whisperServerCommand() {
+        const cmd = ["curl", "-sSf",
+                     "--connect-timeout", "3", "--max-time", "600",
+                     "-F", "file=@" + recordingPath,
+                     "--form-string", "response_format=text",
+                     "--form-string", "no_timestamps=true",
+                     "--form-string", "suppress_nst=true",
+                     "--form-string", "language=" + language]
+        if (translateToEnglish)
+            cmd.push("--form-string", "translate=true")
+        if (vocabPrompt.length > 0)
+            cmd.push("--form-string", "prompt=" + vocabPrompt,
+                     "--form-string", "carry_initial_prompt=true")
+        cmd.push(serverUrl + "/inference")
+        return cmd
     }
 
     // AI transcription prompt: dictation rules plus the injected custom
