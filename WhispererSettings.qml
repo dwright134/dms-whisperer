@@ -26,16 +26,17 @@ PluginSettings {
     // picker only offers the ones actually installed (detectBackends below).
     readonly property var backendMeta: ({
         "whisper.cpp":    { desc: "Local C++ engine. GPU via Vulkan/CUDA if your build supports it, otherwise CPU. Uses the downloadable models below." },
-        "faster-whisper": { desc: "CTranslate2 reimplementation — the fastest option on CPU (int8). Needs the whisper-ctranslate2 command." }
+        "faster-whisper": { desc: "CTranslate2 reimplementation — the fastest option on CPU (int8). Needs the whisper-ctranslate2 command." },
+        "whisper-server": { desc: "A running whisper-server keeps the model loaded in RAM, so every dictation skips the model-load delay. Threads and GPU are fixed when the server starts; models hot-swap from the list below. See the README for setup." }
     })
-    readonly property var backendOrder: ["whisper.cpp", "faster-whisper"]
+    readonly property var backendOrder: ["whisper.cpp", "faster-whisper", "whisper-server"]
 
-    // Which backends are on PATH, and where they resolved. Reactive: the
-    // detection list and the picker rebuild when these change. whisper.cpp
-    // counts as present if any of its binary names resolve; its model files are
-    // handled separately below.
-    property var backendAvail: ({ "whisper.cpp": false, "faster-whisper": false })
-    property var backendPath: ({ "whisper.cpp": "", "faster-whisper": "" })
+    // Which backends are available, and where they resolved (a binary path, or
+    // the probed URL for whisper-server). Reactive: the detection list and the
+    // picker rebuild when these change. whisper.cpp counts as present if any of
+    // its binary names resolve; its model files are handled separately below.
+    property var backendAvail: ({ "whisper.cpp": false, "faster-whisper": false, "whisper-server": false })
+    property var backendPath: ({ "whisper.cpp": "", "faster-whisper": "", "whisper-server": "" })
 
     // The live backend selection, mirrored from the saved value so the
     // per-backend model UI (the whisper.cpp file manager vs the CLI name
@@ -56,6 +57,8 @@ PluginSettings {
     // The local model selected for the active backend, and whether it's an
     // English-only (.en) build. Those can't transcribe non-English audio or run
     // the translate task — the most common footgun — so we warn on the combo.
+    // whisper-server shares modelPath with whisper.cpp (selecting a model
+    // hot-swaps the server to it), so the same warning applies.
     readonly property string selectedLocalModel: currentBackend === "faster-whisper"
         ? fwSelected
         : activeModelPath.split("/").pop().replace("ggml-", "").replace(".bin", "")
@@ -94,17 +97,22 @@ PluginSettings {
                         })
     }
 
-    // Resolve each backend's binary and remember where it landed, so the
-    // detection list can show exactly what was found and the picker can offer
-    // only what's installed. Emits one "<key>=<path>" line per backend present.
+    // Resolve each backend's binary (or probe the server's /health URL) and
+    // remember where it landed, so the detection list can show exactly what was
+    // found and the picker can offer only what's installed. Emits one
+    // "<key>=<path>" line per backend present. The URL is passed as a positional
+    // arg, never spliced into the script, so any stored value is probe-safe.
     function detectBackends() {
+        const url = PluginService.loadPluginData(pluginId, "serverUrl", "http://127.0.0.1:8910")
         Proc.runCommand("whisperer.settings.detectBackends",
                         ["sh", "-c",
                          "p=$(command -v whisper-cli || command -v whisper-cpp || command -v whisper.cpp); [ -n \"$p\" ] && echo \"cpp=$p\"; "
-                         + "p=$(command -v whisper-ctranslate2); [ -n \"$p\" ] && echo \"fw=$p\"; true"],
+                         + "p=$(command -v whisper-ctranslate2); [ -n \"$p\" ] && echo \"fw=$p\"; "
+                         + "curl -sf --max-time 2 -o /dev/null \"$1/health\" && echo \"srv=$1\"; true",
+                         "sh", url],
                         (out, code) => {
-                            const keyMap = { "cpp": "whisper.cpp", "fw": "faster-whisper" }
-                            const paths = { "whisper.cpp": "", "faster-whisper": "" }
+                            const keyMap = { "cpp": "whisper.cpp", "fw": "faster-whisper", "srv": "whisper-server" }
+                            const paths = { "whisper.cpp": "", "faster-whisper": "", "whisper-server": "" }
                             for (const line of (out || "").split("\n")) {
                                 const i = line.indexOf("=")
                                 if (i === -1)
@@ -116,7 +124,8 @@ PluginSettings {
                             backendPath = paths
                             backendAvail = {
                                 "whisper.cpp": paths["whisper.cpp"].length > 0,
-                                "faster-whisper": paths["faster-whisper"].length > 0
+                                "faster-whisper": paths["faster-whisper"].length > 0,
+                                "whisper-server": paths["whisper-server"].length > 0
                             }
                         })
     }
@@ -356,7 +365,9 @@ PluginSettings {
 
                     StyledText {
                         width: parent.width
-                        text: engineRow.found ? engineRow.resolvedPath : "not installed"
+                        text: engineRow.found ? engineRow.resolvedPath
+                              : engineRow.modelData === "whisper-server" ? "not running"
+                              : "not installed"
                         font.pixelSize: Theme.fontSizeSmall
                         color: Theme.surfaceVariantText
                         elide: Text.ElideMiddle
@@ -383,7 +394,9 @@ PluginSettings {
 
         StyledText {
             width: parent.width
-            text: "Download a model, then click it to make it active."
+            text: settingsRoot.currentBackend === "whisper-server"
+                  ? "Download a model, then click it to load it into the running server. The server's startup default (-m in its systemd unit) is updated to match, so a restart keeps the choice."
+                  : "Download a model, then click it to make it active."
             font.pixelSize: Theme.fontSizeSmall
             color: Theme.surfaceVariantText
             wrapMode: Text.WordWrap
@@ -807,7 +820,7 @@ PluginSettings {
             visible: backendSelect.options.length <= 1
             width: parent.width
             wrapMode: Text.WordWrap
-            text: "Install faster-whisper (whisper-ctranslate2) to add the fastest CPU engine — see the README for the command."
+            text: "Install faster-whisper (whisper-ctranslate2) for the fastest CPU engine, or run whisper-server to skip the model-load delay on every dictation — see the README."
             font.pixelSize: Theme.fontSizeSmall
             color: Theme.surfaceVariantText
         }
@@ -1025,8 +1038,48 @@ PluginSettings {
     }
 
     function selectModel(model) {
+        if (currentBackend === "whisper-server") {
+            serverLoadModel(model)
+            return
+        }
         PluginService.savePluginData(pluginId, "modelPath", modelFullPath(model.name))
         activeModelPath = modelFullPath(model.name)
+    }
+
+    // whisper-server model swap: POST /load blocks until the new model is
+    // loaded, so a 200 means it's live — only then is the choice persisted
+    // (modelPath is shared with the whisper.cpp backend, so switching between
+    // the two keeps the same model). The systemd unit's -m flag is then pointed
+    // at the same file so a server restart comes back with it; a server run
+    // outside systemd (no unit file, or no -m in it) just skips that step and
+    // keeps its own startup default. A failed load leaves the previous model
+    // loaded server-side and the previous selection here.
+    function serverLoadModel(model) {
+        const path = modelFullPath(model.name)
+        const url = PluginService.loadPluginData(pluginId, "serverUrl", "http://127.0.0.1:8910")
+        Proc.runCommand("whisperer.settings.serverLoad",
+                        ["sh", "-c",
+                         // The -m flag can sit on an ExecStart continuation
+                         // line, so match it on any non-comment line rather
+                         // than anchoring to ExecStart= itself.
+                         'curl -sf --max-time 300 -F "model=$1" "$2/load" >/dev/null || exit 1; '
+                         + 'u="$HOME/.config/systemd/user/whisper-server.service"; '
+                         + '[ -f "$u" ] || exit 0; '
+                         + 'grep -vE "^[[:space:]]*#" "$u" | grep -qE "(^|[[:space:]])(-m|--model)[[:space:]]" || exit 0; '
+                         + 'sed -i -E "/^[[:space:]]*#/! s#(^|[[:space:]])(-m|--model)[[:space:]]+[^[:space:]]+#\\1-m $1#" "$u" '
+                         + '&& systemctl --user daemon-reload; exit 0',
+                         "sh", path, url],
+                        (out, code) => {
+                            if (code === 0) {
+                                PluginService.savePluginData(pluginId, "modelPath", path)
+                                activeModelPath = path
+                                if (typeof ToastService !== "undefined")
+                                    ToastService.showInfo(model.name + " loaded into whisper-server")
+                            } else if (typeof ToastService !== "undefined") {
+                                ToastService.showError("whisper-server didn't load " + model.name + " — is the server running?")
+                            }
+                            detectBackends()
+                        })
     }
 
     // ── faster-whisper model manager ────────────────────────────────────────
@@ -1231,13 +1284,15 @@ PluginSettings {
                         })
     }
 
-    // Pick up a freshly pasted Google key without reopening the page
+    // Pick up a freshly pasted Google key without reopening the page, and
+    // re-probe the engines so an edited server URL reflects immediately.
     Connections {
         target: PluginService
         function onPluginDataChanged(pluginId) {
             if (pluginId !== settingsRoot.pluginId)
                 return
             settingsRoot.loadModelWarningState()
+            settingsRoot.detectBackends()
             if (!settingsRoot.googleModelsLive)
                 settingsRoot.fetchGoogleModels()
         }
@@ -1389,6 +1444,9 @@ PluginSettings {
         }
 
         SliderSetting {
+            // whisper-server's thread count is fixed when the server starts, so
+            // the slider only applies to the CLI backends.
+            visible: settingsRoot.currentBackend !== "whisper-server"
             settingKey: "transcribeThreads"
             label: "CPU threads"
             description: "CPU threads for local transcription (whisper.cpp -t / faster-whisper --threads). Capped at this machine's " + settingsRoot.cpuThreads + " hardware threads."
@@ -1398,16 +1456,27 @@ PluginSettings {
             unit: ""
         }
 
-        // whisper.cpp downloads and manages its model files locally; the CLI
-        // backends handle their own, so this shows only for whisper.cpp.
+        StringSetting {
+            visible: settingsRoot.currentBackend === "whisper-server"
+            settingKey: "serverUrl"
+            label: "Server URL"
+            description: "Base URL of the running whisper-server. CPU threads and GPU are set by the server's own startup flags — language, translate, vocabulary, and the model picked below still apply. After starting or stopping the server, hit the rescan button above."
+            placeholder: "http://127.0.0.1:8910"
+            defaultValue: "http://127.0.0.1:8910"
+        }
+
+        // The ggml model manager serves both whisper.cpp (click = set the CLI's
+        // model) and whisper-server (click = hot-swap via POST /load) — the two
+        // share the same model files and the same modelPath selection.
         WhisperCppModels {
             visible: settingsRoot.currentBackend === "whisper.cpp"
+                     || settingsRoot.currentBackend === "whisper-server"
         }
 
         // faster-whisper's downloadable model manager (cached indicator +
         // download/delete), shown when that backend is selected.
         FasterWhisperModels {
-            visible: settingsRoot.currentBackend !== "whisper.cpp"
+            visible: settingsRoot.currentBackend === "faster-whisper"
         }
 
         // English-only (.en) model paired with a non-English language or the
