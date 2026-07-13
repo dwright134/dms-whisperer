@@ -1206,6 +1206,22 @@ PluginComponent {
         }
     }
 
+    // Local backends can appear or vanish while the widget sits idle — above all
+    // whisper-server, which the user starts and stops independently of the shell.
+    // The one-shot probe in Component.onCompleted can also race a just-reloaded
+    // plugin and lose, leaving whisperServerReady stuck false. Re-probe on a slow
+    // cadence so localReady — and the keybind/IPC start gate, which (unlike the
+    // popout) never re-probes on its own — converges without a shell restart.
+    // Skipped mid-dictation: nothing changes then, so there's no reason to spawn
+    // probes into the latency-sensitive window.
+    Timer {
+        id: preflightTimer
+        interval: 10000
+        running: true
+        repeat: true
+        onTriggered: if (!root.overlayActive) root.checkPreflight()
+    }
+
     IpcHandler {
         target: "whisperer"
 
