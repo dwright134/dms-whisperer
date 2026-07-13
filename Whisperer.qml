@@ -358,11 +358,13 @@ PluginComponent {
         checkPreflight()
     }
 
-    // Killing the pw-cli client unloads the echo-cancel module (its lifetime is
-    // tied to that connection), so tearing this Process down leaves no orphaned
-    // virtual source behind. Also un-pause any media we ducked.
+    // The AEC module is deliberately NOT unloaded here: it lives in a detached
+    // holder process (see spawnAecHolder) precisely so the whisperer-aec source
+    // survives widget teardown — plugin reloads and shell restarts would
+    // otherwise destroy and recreate it, and every recreation shows up in
+    // PulseAudio clients as a brand-new input device. Unloading happens only
+    // when the user turns the feature off. Just un-pause any media we ducked.
     Component.onDestruction: {
-        aecModule.running = false
         restoreMedia()
     }
 
@@ -389,8 +391,7 @@ PluginComponent {
     function detectAudioCleanup() {
         if (!cancelBackgroundMusic) {
             aecTier = "none"
-            aecReady = false
-            aecModule.running = false
+            stopAecHolder()
             return
         }
         Proc.runCommand("whisperer.aec.detect." + instanceId,
@@ -404,8 +405,7 @@ PluginComponent {
                 if (root.aecTier === "aec") {
                     root.ensureAecModule()
                 } else {
-                    root.aecReady = false
-                    aecModule.running = false
+                    root.stopAecHolder()
                 }
             })
     }
@@ -423,10 +423,41 @@ PluginComponent {
              + 'capture.props = { node.passive = true } }'
     }
 
-    // Make sure the echo-cancel source exists, loading the module if it doesn't.
-    // Called on detection and before each recording, so the source is recreated
-    // after a PipeWire restart. Sets aecReady only once the node is confirmed;
-    // until then aecActive stays false and recording uses the raw mic.
+    // The module must outlive this widget instance: when a plugin-owned client
+    // held it, every reload and shell restart destroyed and recreated the
+    // whisperer-aec source, and each recreation appeared to PulseAudio clients
+    // as a brand-new input device (Discord prompts to switch to it every time).
+    // A detached holder keeps the module loaded across teardowns, so ensure-
+    // AecModule() adopts the existing node and the device is created at most
+    // once per login session. pw-cli keeps the module for exactly as long as it
+    // stays connected (and survives stdin EOF), so the holder backgrounds it,
+    // traps TERM to kill it (that's the unload path), and exits by itself when
+    // pw-cli dies with a PipeWire restart. The flock guarantees a single holder
+    // even if several widget instances race to spawn one.
+    function spawnAecHolder() {
+        Quickshell.execDetached(["sh", "-c",
+            'exec 9>"${XDG_RUNTIME_DIR:-/tmp}/whisperer-aec-holder.lock"; ' +
+            "flock -n 9 || exit 0; " +
+            "printf '%s\\n' 'load-module libpipewire-module-echo-cancel " + aecModuleArgs() + "' | pw-cli >/dev/null 2>&1 & " +
+            'pw=$!; trap \'kill "$pw" 2>/dev/null\' TERM INT; wait "$pw"'])
+    }
+
+    // Unload the module by killing the holder — its lock-file path doubles as
+    // the pkill marker (bracket trick so the pattern never matches a caller).
+    // Only the feature toggle ends up here, not widget teardown, so disabling
+    // or removing the plugin with the feature on leaves the source until
+    // logout. pkill exits 1 when no holder was running; that's not an error.
+    function stopAecHolder() {
+        aecReady = false
+        Proc.runCommand("whisperer.aec.stop." + instanceId,
+                        ["pkill", "-f", "whisperer-aec-holde[r]"], () => {})
+    }
+
+    // Make sure the echo-cancel source exists, spawning the holder if it
+    // doesn't. Called on detection, before each recording, and from the
+    // preflight timer, so the source is recreated after a PipeWire restart.
+    // Sets aecReady only once the node is confirmed; until then aecActive
+    // stays false and recording uses the raw mic.
     function ensureAecModule() {
         if (!cancelBackgroundMusic || aecTier !== "aec")
             return
@@ -438,10 +469,8 @@ PluginComponent {
                     root.aecReady = true
                 } else {
                     root.aecReady = false
-                    if (!aecModule.running) {
-                        aecModule.running = true           // onStarted loads the module
-                        aecRecheckTimer.restart()          // confirm the node appears
-                    }
+                    root.spawnAecHolder()      // no-op if one is already up (flock)
+                    aecRecheckTimer.restart()  // confirm the node appears
                 }
             })
     }
@@ -881,28 +910,10 @@ PluginComponent {
         }
     }
 
-    // Owns the PipeWire echo-cancel module. pw-cli holds the module for exactly
-    // as long as this client stays connected (verified: the virtual source
-    // disappears the moment the client dies), so keeping this Process running
-    // keeps the AEC source warm — better cancellation — and setting running=false
-    // (toggle off, or Component.onDestruction) tears it down cleanly with no
-    // explicit unload and no orphaned node. pw-cli keeps running after stdin EOF.
-    Process {
-        id: aecModule
-        running: false
-        command: ["pw-cli"]
-        stdinEnabled: true
-        onStarted: write("load-module libpipewire-module-echo-cancel " + root.aecModuleArgs() + "\n")
-        onExited: exitCode => {
-            root.aecReady = false
-            // A PipeWire restart drops our client; re-arm if the feature still wants it.
-            if (root.cancelBackgroundMusic && root.aecTier === "aec")
-                aecRecheckTimer.restart()
-        }
-    }
-
-    // Re-runs ensureAecModule shortly after a (re)load to flip aecReady once the
-    // source node actually appears, and to reload after the client is dropped.
+    // Re-runs ensureAecModule shortly after a holder spawn to flip aecReady once
+    // the source node actually appears. (The module itself lives in the detached
+    // holder — see spawnAecHolder; a PipeWire restart is picked up by the
+    // preflight timer's periodic ensure, since the holder dies silently.)
     Timer {
         id: aecRecheckTimer
         interval: 700
@@ -1219,7 +1230,17 @@ PluginComponent {
         interval: 10000
         running: true
         repeat: true
-        onTriggered: if (!root.overlayActive) root.checkPreflight()
+        onTriggered: {
+            if (root.overlayActive)
+                return
+            root.checkPreflight()
+            // Also true up the AEC source: a PipeWire restart kills the
+            // detached holder silently (there's no onExited to observe), so
+            // this idle re-ensure is what re-arms echo cancellation before
+            // the next recording.
+            if (root.cancelBackgroundMusic && root.aecTier === "aec")
+                root.ensureAecModule()
+        }
     }
 
     IpcHandler {
