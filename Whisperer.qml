@@ -430,16 +430,31 @@ PluginComponent {
     // A detached holder keeps the module loaded across teardowns, so ensure-
     // AecModule() adopts the existing node and the device is created at most
     // once per login session. pw-cli keeps the module for exactly as long as it
-    // stays connected (and survives stdin EOF), so the holder backgrounds it,
-    // traps TERM to kill it (that's the unload path), and exits by itself when
-    // pw-cli dies with a PipeWire restart. The flock guarantees a single holder
-    // even if several widget instances race to spawn one.
+    // stays connected, so the holder backgrounds it, traps TERM to kill it
+    // (that's the unload path), and exits by itself when pw-cli dies with a
+    // PipeWire restart. The flock guarantees a single holder even if several
+    // widget instances race to spawn one.
+    //
+    // pw-cli must NOT see stdin EOF: on current PipeWire it busy-loops at 100%
+    // CPU instead of idling once the pipe closes (issue #36). So the holder
+    // feeds pw-cli through a FIFO whose write end it keeps open (fd 8, opened
+    // read-write so the open never blocks) for the holder's whole life. The one
+    // load-module line is written up front; pw-cli then blocks reading and idles
+    // at ~0% CPU. Holding the write end in the shell itself — rather than a
+    // trailing `sleep infinity` writer — means there is no extra process to
+    // orphan when the holder exits or is re-spawned.
     function spawnAecHolder() {
         Quickshell.execDetached(["sh", "-c",
-            'exec 9>"${XDG_RUNTIME_DIR:-/tmp}/whisperer-aec-holder.lock"; ' +
+            'd="${XDG_RUNTIME_DIR:-/tmp}"; ' +
+            'exec 9>"$d/whisperer-aec-holder.lock"; ' +
             "flock -n 9 || exit 0; " +
-            "printf '%s\\n' 'load-module libpipewire-module-echo-cancel " + aecModuleArgs() + "' | pw-cli >/dev/null 2>&1 & " +
-            'pw=$!; trap \'kill "$pw" 2>/dev/null\' TERM INT; wait "$pw"'])
+            'f="$d/whisperer-aec-holder.fifo"; ' +
+            'mkfifo -m600 "$f" 2>/dev/null || true; ' +
+            'exec 8<>"$f"; ' +
+            "pw-cli <&8 >/dev/null 2>&1 & " +
+            'pw=$!; ' +
+            "printf '%s\\n' 'load-module libpipewire-module-echo-cancel " + aecModuleArgs() + "' >&8; " +
+            'trap \'kill "$pw" 2>/dev/null\' TERM INT; wait "$pw"'])
     }
 
     // Unload the module by killing the holder — its lock-file path doubles as
