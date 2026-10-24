@@ -17,7 +17,7 @@ niri/Wayland.
 
 ```
 right-click pill / popout Record button / IPC / your keybind
-  → pw-record (PipeWire, 16kHz mono WAV → /tmp)
+  → pw-record (PipeWire, 16kHz mono WAV → private $XDG_RUNTIME_DIR directory)
   → ffmpeg silence gate (skip empty clips)
   → local backend (whisper-cli / whisper-ctranslate2 / whisper-server)   ── or ──   audio-capable AI model (OpenRouter / Gemini)
   → wtype (types transcript at focused cursor)
@@ -30,9 +30,12 @@ right-click pill / popout Record button / IPC / your keybind
 - **PipeWire** — `pw-record` (capture), `pw-cli` (echo-cancel), `pw-play` (sound cues)
 - **ffmpeg** — silence detection before transcription
 - **wtype** — types the transcript into the focused window
-- **whisper.cpp** — the `whisper-cli` binary (auto-detected on `PATH`; see [below](#whispercpp-binary)).
-  Required for **local** transcription; AI dictation doesn't need it (see below).
-- a **ggml model** — downloaded in-app from the settings model manager (local transcription only)
+- **curl** — model downloads, server health checks, and cloud/server transcription
+- **flock** (util-linux) — coordinates media restoration and temporary-file cleanup
+- **XDG_RUNTIME_DIR** — a writable, user-owned runtime directory, normally provided by the login session
+- For local transcription, choose **whisper.cpp**, **faster-whisper**, or a running **whisper-server**.
+  See [local backends](#local-backends). AI-only dictation needs no local backend.
+  CLI backends also need a downloaded model, available in the settings model manager.
 
 Optional:
 
@@ -109,8 +112,8 @@ whisper.cpp is the default. Every backend has an in-settings model manager (down
 indicator, delete); whisper.cpp and whisper-server share the same `ggml-*.bin` files, faster-whisper
 stores model directories under `~/.local/share/whisperer/faster-whisper`. A model must be downloaded
 before you can select it — no backend fetches models implicitly. For whisper-server, clicking a
-model hot-swaps it into the running server (`POST /load`) and updates the server's startup default,
-so the choice survives restarts.
+model hot-swaps it into the running server (`POST /load`). The server's startup default stays
+under your control.
 
 ### whisper.cpp
 
@@ -223,10 +226,9 @@ server answers its health probe — hit the rescan button after starting it) and
 URL** if you changed the port. The model stays resident while the server runs (~600 MB for `small`).
 
 **Switching models**: click a downloaded model in the settings model manager — it's hot-swapped into
-the running server (`POST /load`, a second or two) and the unit file's `-m` flag is rewritten (plus
-`daemon-reload`) so the server comes back with the same model after a restart. If the server runs
-outside systemd (no `~/.config/systemd/user/whisper-server.service`), the live swap still works but
-the startup default stays whatever your own command says.
+the running server (`POST /load`, a second or two). Whisperer does not edit your systemd service.
+To persist a different startup model, update the `-m` argument in your own service or launch command.
+For a systemd service, run `systemctl --user daemon-reload` after editing the unit.
 
 ## Usage
 
@@ -335,10 +337,24 @@ Mod+Shift+A { spawn "dms" "ipc" "call" "whisperer" "toggleAi"; }
   dropped.
 - **Remove background music**: strip speaker audio from the recording using PipeWire echo
   cancellation when available, falling back to pausing media players (playerctl) while recording.
+  The echo-cancel source is held by a detached process so reloads and shell restarts do not repeatedly
+  create a new microphone device. Turning this setting off stops the holder. Disabling or removing
+  the plugin while it is on leaves the holder and source until logout. Turn the setting off before
+  removal, or run `pkill -f 'whisperer-aec-holde[r]'` to stop it manually.
 - **Auto-stop on silence** (off by default): stop on its own after a configurable 1–15 s of
   silence. It only arms once you've said something, and voice detection is relative to an adaptive
   noise floor, so mic volume and room noise don't need tuning. Either way there's a 5-minute cap.
 - **Sound cues**: freedesktop chimes on start / done / error (toggleable).
+
+Recordings, media-pause markers, and CLI output use a unique mode-0700 directory under
+`$XDG_RUNTIME_DIR` for each take. Recordings are created with a private umask. Whisperer removes
+the directory after success, silence, cancellation, terminal failure, or widget teardown. An AI
+failure keeps the audio only while the fallback prompt is open. Abrupt process termination may
+leave private files until the login session's runtime directory is cleared.
+
+Backend checks run on load, settings changes, popout opening, and recording startup. There is no
+periodic idle polling. Only the selected whisper-server backend is probed by the widget; the
+settings backend picker also checks the server when scanning available backends.
 
 ## Repo layout
 

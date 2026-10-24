@@ -2,7 +2,7 @@
     "id": "whisperer",
     "name": "Whisperer",
     "description": "Voice dictation: records your voice, transcribes it locally with whisper.cpp or faster-whisper (or a cloud AI model), and types the result at the cursor",
-    "version": "0.5.2",
+    "version": "0.5.3",
     "author": "dwright",
     "screenshot": "https://raw.githubusercontent.com/dwright134/dms-whisperer/main/docs/popout.png",
     "screenshots": ["https://raw.githubusercontent.com/dwright134/dms-whisperer/main/docs/popout.png"],
@@ -12,6 +12,6 @@
     "icon": "mic",
     "settings": "./WhispererSettings.qml",
     "requires_dms": ">=1.0.0",
-    "requires": ["pw-record", "pw-cli", "wtype", "whisper-cli", "secret-tool"],
+    "requires": ["pw-record", "ffmpeg", "wtype", "curl", "flock"],
     "permissions": ["settings_read", "settings_write", "process"]
 }

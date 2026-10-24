@@ -15,9 +15,13 @@ PluginComponent {
     // plugin is loaded once per output (e.g. multi-monitor setups in Niri/Hyprland).
     readonly property string instanceId: Math.random().toString(36).substring(2, 9)
     readonly property string home: Quickshell.env("HOME")
-    readonly property string recordingPath: "/tmp/whisperer-recording.wav"
+    // mktemp creates a private directory per take under the user's runtime dir.
+    property string sessionDir: ""
+    property int startGeneration: 0
+    property bool shuttingDown: false
+    readonly property string recordingPath: sessionDir + "/recording.wav"
     // Records which media players we paused (duck fallback) so we resume only those
-    readonly property string duckMarkerPath: "/tmp/whisperer-ducked"
+    readonly property string duckMarkerPath: sessionDir + "/ducked"
     readonly property int maxRecordSeconds: 300
     // whisper-cli CPU threads (-t). User-configurable in settings, capped there
     // to the machine's thread count; 0/unset falls back to 4.
@@ -28,7 +32,7 @@ PluginComponent {
     // |sample| ceiling for s16 (signed 16-bit) audio, for dBFS conversion
     readonly property int s16PeakMax: 32768
 
-    // idle | recording | stopping | transcribing | polishing | aiError | error
+    // idle | preparing | recording | stopping | transcribing | polishing | aiError | error
     property string sttState: "idle"
     property int elapsedSeconds: 0
     property string pendingText: ""
@@ -125,10 +129,10 @@ PluginComponent {
 
     // Whisper pre-flight: a local transcription needs both the whisper-cli
     // binary (executable) and the model file (readable). These are probed on
-    // load and whenever settings change — never on every record click — so the
+    // load, on popout opening and whenever settings change, so the
     // Record button and startRecording() gate reflect current state cheaply.
     // Until the async probe confirms them, both stay false and recording is
-    // blocked, which is the safe default for a first run with nothing installed.
+    // blocked in the UI. IPC startup performs its own fresh asynchronous probe.
     property bool whisperBinReady: false
     property bool modelFileReady: false
     // faster-whisper needs its command on PATH *and* the selected model
@@ -204,10 +208,12 @@ PluginComponent {
                         (out, code) => root.fwModelReady = (code === 0))
         // /health answers 200 only once the server's model is loaded (503 while
         // loading), so -f covers both "not running" and "not ready yet".
-        Proc.runCommand("whisperer.preflight.server." + instanceId,
-                        ["curl", "-sf", "--max-time", "2", "-o", "/dev/null",
-                         serverUrl + "/health"],
-                        (out, code) => root.whisperServerReady = (code === 0))
+        if (backend === "whisper-server") {
+            Proc.runCommand("whisperer.preflight.server." + instanceId,
+                            ["curl", "-sf", "--max-time", "2", "-o", "/dev/null",
+                             serverUrl + "/health"],
+                            (out, code) => root.whisperServerReady = (code === 0))
+        }
         detectBackends()
     }
 
@@ -263,7 +269,7 @@ PluginComponent {
     }
 
     // Overlay state
-    readonly property bool overlayActive: sttState === "recording" || sttState === "stopping" || sttState === "cancelling" || sttState === "transcribing" || sttState === "polishing"
+    readonly property bool overlayActive: sttState === "preparing" || sttState === "recording" || sttState === "stopping" || sttState === "cancelling" || sttState === "transcribing" || sttState === "polishing"
     // "aiError" keeps the overlay up with no linger timer — a sticky prompt that
     // holds until the user picks local-fallback or cancel.
     readonly property bool overlayShown: overlayActive || sttState === "aiError" || doneLingerTimer.running
@@ -363,15 +369,24 @@ PluginComponent {
     // survives widget teardown — plugin reloads and shell restarts would
     // otherwise destroy and recreate it, and every recreation shows up in
     // PulseAudio clients as a brand-new input device. Unloading happens only
-    // when the user turns the feature off. Just un-pause any media we ducked.
+    // when the user turns the feature off. Clean up the current take here.
     Component.onDestruction: {
-        restoreMedia()
+        shuttingDown = true
+        ++startGeneration
+        sttState = "idle"
+        recorder.running = false
+        silenceCheck.running = false
+        transcriber.running = false
+        aiTranscriber.running = false
+        cleanupSession()
     }
 
     Connections {
         target: PluginService
         function onPluginDataChanged(pluginId) {
             if (pluginId === root.whispererId) {
+                if (root.sttState === "preparing")
+                    root.cancelRecording()
                 root.loadSettings()
                 // Re-run detection so toggling the setting live loads or unloads
                 // the AEC module (and restores media if we were ducking).
@@ -401,6 +416,8 @@ PluginComponent {
              "[ -e \"$d/libpipewire-module-echo-cancel.so\" ] && { echo aec; exit 0; }; done; " +
              "command -v playerctl >/dev/null 2>&1 && echo duck || echo none"],
             (out, code) => {
+                if (!root || root.shuttingDown)
+                    return
                 root.aecTier = (out || "").trim() || "none"
                 if (root.aecTier === "aec") {
                     root.ensureAecModule()
@@ -445,7 +462,7 @@ PluginComponent {
     // orphan when the holder exits or is re-spawned.
     function spawnAecHolder() {
         Quickshell.execDetached(["sh", "-c",
-            'd="${XDG_RUNTIME_DIR:-/tmp}"; ' +
+            'd="${XDG_RUNTIME_DIR:?}"; [ -d "$d" ] && [ -O "$d" ] || exit 1; ' +
             'exec 9>"$d/whisperer-aec-holder.lock"; ' +
             "flock -n 9 || exit 0; " +
             'f="$d/whisperer-aec-holder.fifo"; ' +
@@ -470,16 +487,21 @@ PluginComponent {
 
     // Make sure the echo-cancel source exists, spawning the holder if it
     // doesn't. Called on detection, before each recording, and from the
-    // preflight timer, so the source is recreated after a PipeWire restart.
+    // popout opening, so the source is recreated after a PipeWire restart.
     // Sets aecReady only once the node is confirmed; until then aecActive
     // stays false and recording uses the raw mic.
-    function ensureAecModule() {
-        if (!cancelBackgroundMusic || aecTier !== "aec")
+    function ensureAecModule(callback) {
+        if (!cancelBackgroundMusic || aecTier !== "aec") {
+            if (callback)
+                callback()
             return
+        }
         Proc.runCommand("whisperer.aec.check." + instanceId,
             ["sh", "-c",
              "pw-cli ls Node 2>/dev/null | grep -q 'node.name = \"" + aecSourceName + "\"'"],
             (out, code) => {
+                if (!root || root.shuttingDown)
+                    return
                 if (code === 0) {
                     root.aecReady = true
                 } else {
@@ -487,6 +509,8 @@ PluginComponent {
                     root.spawnAecHolder()      // no-op if one is already up (flock)
                     aecRecheckTimer.restart()  // confirm the node appears
                 }
+                if (callback)
+                    callback()
             })
     }
 
@@ -494,22 +518,73 @@ PluginComponent {
     // their names so restoreMedia resumes exactly those (never un-pausing music
     // the user had already paused). Fire-and-forget, like the sound cues.
     function duckMedia() {
-        if (!(cancelBackgroundMusic && aecTier === "duck"))
+        if (!(cancelBackgroundMusic && aecTier === "duck") || !sessionDir)
             return
         Quickshell.execDetached(["sh", "-c",
-            "> '" + duckMarkerPath + "'; " +
-            "playerctl -l 2>/dev/null | while IFS= read -r p; do " +
-            "[ \"$(playerctl -p \"$p\" status 2>/dev/null)\" = Playing ] && " +
-            "{ printf '%s\\n' \"$p\" >> '" + duckMarkerPath + "'; playerctl -p \"$p\" pause; }; done"])
+            'umask 077; exec 9>"$1.lock" || exit 0; flock 9 || exit 1; ' +
+            ': > "$1" || exit 0; ' +
+            'playerctl -l 2>/dev/null | while IFS= read -r p; do ' +
+            '[ "$(playerctl -p "$p" status 2>/dev/null)" = Playing ] && ' +
+            '{ printf "%s\\n" "$p" >> "$1"; playerctl -p "$p" pause; }; done',
+            "whisperer-duck", duckMarkerPath])
     }
 
-    // Resume whatever we ducked. Idempotent — guarded by the marker file, which it
-    // removes — so it's safe to call on stop, error, toggle-off, and destruction.
+    // Resume only the players paused by this take, then remove the marker.
     function restoreMedia() {
+        if (!sessionDir)
+            return
         Quickshell.execDetached(["sh", "-c",
-            "[ -f '" + duckMarkerPath + "' ] || exit 0; " +
-            "while IFS= read -r p; do playerctl -p \"$p\" play 2>/dev/null; done < '" + duckMarkerPath + "'; " +
-            "rm -f '" + duckMarkerPath + "'"])
+            'umask 077; exec 9>"$1.lock" || exit 0; flock 9 || exit 1; ' +
+            '[ -f "$1" ] || exit 0; ' +
+            'while IFS= read -r p; do playerctl -p "$p" play 2>/dev/null; done < "$1"; ' +
+            'rm -f -- "$1"', "whisperer-restore", duckMarkerPath])
+    }
+
+    function removeSessionDirectory(dir) {
+        if (!dir)
+            return
+        // Detached cleanup must survive widget destruction. Arguments stay out
+        // of shell source, including runtime paths containing quotes or spaces.
+        // The same lock serializes ducking, restoring, and deletion so a quick
+        // cancel cannot delete the marker before a player is paused.
+        Quickshell.execDetached(["sh", "-c",
+            'umask 077; exec 9>"$1/ducked.lock" || exit 0; flock 9 || exit 1; ' +
+            'if [ -f "$1/ducked" ]; then ' +
+            'while IFS= read -r p; do playerctl -p "$p" play 2>/dev/null; done < "$1/ducked"; fi; ' +
+            'rm -rf -- "$1"', "whisperer-cleanup", dir])
+    }
+
+    function cleanupSession() {
+        const dir = sessionDir
+        sessionDir = ""
+        removeSessionDirectory(dir)
+    }
+
+    // Probe only the chosen backend before opening the microphone. This is
+    // asynchronous so IPC starts work even if cached UI readiness is stale.
+    function checkRecordingReady(callback) {
+        const selectedBackend = backend
+        let command
+        if (selectedBackend === "whisper-server") {
+            command = ["curl", "-sf", "--max-time", "2", "-o", "/dev/null", serverUrl + "/health"]
+        } else if (selectedBackend === "faster-whisper") {
+            command = ["sh", "-c",
+                       'command -v whisper-ctranslate2 >/dev/null && test -r "$1/model.bin"',
+                       "whisperer", fwModelsDir + "/" + ctModel]
+        } else {
+            command = ["sh", "-c",
+                       'test -r "$2" || exit 1; if test -x "$1"; then printf "%s\\n" "$1"; ' +
+                       'else command -v whisper-cli || command -v whisper-cpp || command -v whisper.cpp; fi',
+                       "whisperer", whisperBin, modelPath]
+        }
+        Proc.runCommand(null, command,
+                        (out, code) => {
+                            if (!root || root.shuttingDown)
+                                return
+                            if (code === 0 && selectedBackend === "whisper.cpp")
+                                root.whisperBin = out.trim()
+                            callback(code === 0)
+                        })
     }
 
     function playCue(kind) {
@@ -528,7 +603,9 @@ PluginComponent {
     }
 
     function toggleRecording() {
-        if (sttState === "recording")
+        if (sttState === "preparing")
+            cancelRecording()
+        else if (sttState === "recording")
             stopRecording()
         else if (sttState === "idle" || sttState === "error" || sttState === "aiError")
             startRecording(false)
@@ -537,7 +614,9 @@ PluginComponent {
     // AI keybind: starts an AI-transcription session; pressed mid-recording it
     // upgrades the session to AI mode and stops, so either bind can finish
     function toggleAiRecording() {
-        if (sttState === "recording") {
+        if (sttState === "preparing") {
+            cancelRecording()
+        } else if (sttState === "recording") {
             aiSession = true
             stopRecording()
         } else if (sttState === "idle" || sttState === "error" || sttState === "aiError") {
@@ -552,16 +631,48 @@ PluginComponent {
     }
 
     function startRecording(aiEdit) {
-        aiSession = aiEdit === true
-        // Pre-flight gate: don't record a clip we can't transcribe. An AI
-        // session with a key transcribes over the API (local whisper is only its
-        // fallback), so it's allowed through; every other path — plain local
-        // dictation, or an AI attempt with no key that degrades to local —
-        // requires the local binary and model to be present.
-        if (!(aiSession && activeAiKey.trim().length > 0) && !localReady) {
-            fail(preflightReason)
+        if (overlayActive)
             return
+        cleanupSession()
+        const generation = ++startGeneration
+        aiSession = aiEdit === true
+        sttState = "preparing"
+        errorResetTimer.stop()
+        const prepare = ready => {
+            if (!root || root.shuttingDown || generation !== root.startGeneration)
+                return
+            if (!ready) {
+                root.checkPreflight()
+                root.fail("Selected transcription backend is unavailable. Check its binary, model or server in settings.")
+                return
+            }
+            Proc.runCommand(null,
+                            ["sh", "-c",
+                             'd="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}"; ' +
+                             '[ -d "$d" ] && [ -O "$d" ] && [ -w "$d" ] || exit 1; ' +
+                             'umask 077; mktemp -d "$d/whisperer.XXXXXXXXXX"'],
+                            (out, code) => {
+                                const dir = out.trim()
+                                if (!root || root.shuttingDown || generation !== root.startGeneration) {
+                                    if (code === 0 && dir)
+                                        Quickshell.execDetached(["rm", "-rf", "--", dir])
+                                    return
+                                }
+                                if (code !== 0 || !dir) {
+                                    root.fail("Cannot create a private recording directory in XDG_RUNTIME_DIR")
+                                    return
+                                }
+                                root.sessionDir = dir
+                                root.beginRecording()
+                            })
         }
+        if (aiSession && activeAiKey.trim().length > 0)
+            prepare(true)
+        else
+            checkRecordingReady(prepare)
+    }
+
+    function beginRecording() {
         sttState = "recording"
         elapsedSeconds = 0
         levelHistory = new Array(waveBarCount).fill(0)
@@ -569,14 +680,20 @@ PluginComponent {
         voiceHeard = false
         noiseFloor = 500
         lastVoiceAt = Date.now()
-        if (cancelBackgroundMusic) {
-            if (aecTier === "aec")
-                ensureAecModule()   // recreate the source if a PipeWire restart dropped it
-            else if (aecTier === "duck")
-                duckMedia()
+        const dir = sessionDir
+        const record = () => {
+            if (!root || root.shuttingDown || root.sttState !== "recording" || root.sessionDir !== dir)
+                return
+            recorder.running = true
+            playCue("start")
         }
-        recorder.running = true
-        playCue("start")
+        if (cancelBackgroundMusic && aecTier === "aec") {
+            ensureAecModule(record)
+        } else {
+            if (cancelBackgroundMusic && aecTier === "duck")
+                duckMedia()
+            record()
+        }
     }
 
     function handleLevel(peak) {
@@ -606,6 +723,7 @@ PluginComponent {
     function stopRecording() {
         restoreMedia()   // resume any ducked players (no-op if we didn't duck)
         if (!recorder.running) {
+            cleanupSession()
             sttState = "idle"
             return
         }
@@ -617,6 +735,11 @@ PluginComponent {
     // Abort the current recording without transcribing or typing anything.
     // Bound to Escape while the overlay holds focus, and exposed over IPC.
     function cancelRecording() {
+        if (sttState === "preparing") {
+            ++startGeneration
+            finishCancel()
+            return
+        }
         if (sttState !== "recording" && sttState !== "stopping")
             return
         restoreMedia()   // resume any ducked players
@@ -638,12 +761,11 @@ PluginComponent {
         doneLingerTimer.restart()
         playCue("error")
         // Discard the partial WAV so it can never be picked up by a later run
-        Proc.runCommand("whisperer.discardRecording." + instanceId,
-                        ["rm", "-f", recordingPath], () => {})
+        cleanupSession()
     }
 
     function fail(message) {
-        restoreMedia()   // never leave media paused because a recording errored out
+        cleanupSession()   // never leave media paused because a recording errored out
         console.warn("Whisperer:", message)
         sttState = "error"
         doneKind = "error"
@@ -670,6 +792,7 @@ PluginComponent {
     }
 
     function noSpeech() {
+        cleanupSession()
         sttState = "idle"
         doneKind = "error"
         doneText = "No speech detected"
@@ -720,14 +843,18 @@ PluginComponent {
     function fallbackToLocal() {
         if (sttState !== "aiError")
             return
-        if (!localReady) {
-            fail(preflightReason)   // can't fall back — say why instead
-            return
-        }
-        aiSession = false           // it's a local transcription now
+        aiSession = false
         aiErrorText = ""
         sttState = "transcribing"
-        transcriber.running = true
+        const generation = startGeneration
+        checkRecordingReady(ready => {
+            if (!root || root.shuttingDown || generation !== root.startGeneration || root.sttState !== "transcribing")
+                return
+            if (ready)
+                transcriber.running = true
+            else
+                root.fail("Local transcription backend is unavailable. Check settings.")
+        })
     }
 
     // "Cancel" from the sticky prompt: discard the take, brief flash, back to idle.
@@ -740,8 +867,7 @@ PluginComponent {
         doneKind = "error"
         doneText = "AI cancelled"
         doneLingerTimer.restart()
-        Proc.runCommand("whisperer.discardRecording." + instanceId,
-                        ["rm", "-f", recordingPath], () => {})
+        cleanupSession()
     }
 
     // True if ch is a cased letter (any script), a digit, or an uncased-script
@@ -803,6 +929,7 @@ PluginComponent {
     }
 
     function deliver(text) {
+        cleanupSession()
         pushHistory(text)
         if (copyText)
             Quickshell.execDetached(["dms", "cl", "copy", text])
@@ -865,6 +992,8 @@ PluginComponent {
 
     function stateLabel() {
         switch (sttState) {
+        case "preparing":
+            return "Preparing microphone…"
         case "recording":
             return "Recording · " + formatElapsed() + (aiSession ? " · AI" : "")
         case "stopping":
@@ -892,9 +1021,11 @@ PluginComponent {
             if (root.aecActive)
                 c.push("--target", root.aecSourceName)
             c.push(root.recordingPath)
-            return c
+            return ["sh", "-c", 'umask 077; exec "$@"', "whisperer-record"].concat(c)
         }
         onExited: exitCode => {
+            if (root.shuttingDown)
+                return
             if (root.sttState === "cancelling") {
                 root.finishCancel()
             } else if (root.sttState === "stopping") {
@@ -927,8 +1058,8 @@ PluginComponent {
 
     // Re-runs ensureAecModule shortly after a holder spawn to flip aecReady once
     // the source node actually appears. (The module itself lives in the detached
-    // holder — see spawnAecHolder; a PipeWire restart is picked up by the
-    // preflight timer's periodic ensure, since the holder dies silently.)
+    // holder — see spawnAecHolder; recording startup and popout opening
+    // check again after a PipeWire restart.)
     Timer {
         id: aecRecheckTimer
         interval: 700
@@ -944,6 +1075,8 @@ PluginComponent {
             waitForEnd: true
         }
         onExited: exitCode => {
+            if (root.shuttingDown)
+                return
             const match = volumeOut.text.match(/max_volume:\s*(-?[\d.]+)\s*dB/)
             if (exitCode === 0 && match && parseFloat(match[1]) < root.silenceThresholdDb)
                 root.noSpeech()
@@ -970,6 +1103,8 @@ PluginComponent {
             waitForEnd: true
         }
         onExited: exitCode => {
+            if (root.shuttingDown)
+                return
             if (exitCode === 0)
                 root.handleTranscript(transcriptOut.text)
             else
@@ -1018,10 +1153,10 @@ PluginComponent {
             args.push("--initial_prompt", vocabPrompt)
         // $@ is the tool invocation; --output_dir is appended so the .txt lands
         // in the scratch dir, then cat'd out. Exit status is the tool's.
-        const script = 'd=/tmp/whisperer-cli-out; rm -rf "$d"; mkdir -p "$d"; '
+        const script = 'd="$1/cli-out"; shift; umask 077; mkdir -m 700 "$d" || exit 1; '
                      + '"$@" --output_dir "$d" >/dev/null 2>&1; s=$?; '
-                     + 'cat "$d"/*.txt 2>/dev/null; rm -rf "$d"; exit $s'
-        return ["sh", "-c", script, "whisperer"].concat(args)
+                     + 'cat "$d"/*.txt 2>/dev/null; rm -rf -- "$d"; exit $s'
+        return ["sh", "-c", script, "whisperer", sessionDir].concat(args)
     }
 
     // whisper-server does the same inference as whisper-cli but keeps the model
@@ -1137,6 +1272,8 @@ PluginComponent {
             waitForEnd: true
         }
         onExited: exitCode => {
+            if (root.shuttingDown)
+                return
             if (exitCode === 0) {
                 try {
                     const resp = JSON.parse(aiOut.text)
@@ -1192,6 +1329,8 @@ PluginComponent {
                   'first=0; done; }',
                   "whisperer", root.pendingText]
         onExited: exitCode => {
+            if (root.shuttingDown)
+                return
             if (exitCode !== 0)
                 root.fail("wtype failed (code " + exitCode + ")")
         }
@@ -1229,32 +1368,6 @@ PluginComponent {
         onTriggered: {
             if (!root.overlayShown)
                 root.overlayWindowVisible = false
-        }
-    }
-
-    // Local backends can appear or vanish while the widget sits idle — above all
-    // whisper-server, which the user starts and stops independently of the shell.
-    // The one-shot probe in Component.onCompleted can also race a just-reloaded
-    // plugin and lose, leaving whisperServerReady stuck false. Re-probe on a slow
-    // cadence so localReady — and the keybind/IPC start gate, which (unlike the
-    // popout) never re-probes on its own — converges without a shell restart.
-    // Skipped mid-dictation: nothing changes then, so there's no reason to spawn
-    // probes into the latency-sensitive window.
-    Timer {
-        id: preflightTimer
-        interval: 10000
-        running: true
-        repeat: true
-        onTriggered: {
-            if (root.overlayActive)
-                return
-            root.checkPreflight()
-            // Also true up the AEC source: a PipeWire restart kills the
-            // detached holder silently (there's no onExited to observe), so
-            // this idle re-ensure is what re-arms echo cancellation before
-            // the next recording.
-            if (root.cancelBackgroundMusic && root.aecTier === "aec")
-                root.ensureAecModule()
         }
     }
 
@@ -1414,8 +1527,8 @@ PluginComponent {
 
         anchors.bottom: !root.overlayAtTop
         anchors.top: root.overlayAtTop
-        margins.bottom: root.overlayAtTop ? 0 : 48
-        margins.top: root.overlayAtTop ? 48 : 0
+        margins.bottom: root.overlayAtTop ? 0 : Theme.spacingXL * 2
+        margins.top: root.overlayAtTop ? Theme.spacingXL * 2 : 0
         implicitWidth: root.sttState === "aiError" ? 420 : 360
         implicitHeight: root.sttState === "aiError" ? 200 : 100
 
@@ -1425,11 +1538,11 @@ PluginComponent {
             anchors.bottom: root.overlayAtTop ? undefined : parent.bottom
             anchors.top: root.overlayAtTop ? parent.top : undefined
             // Slides toward the nearest screen edge while fading out
-            anchors.bottomMargin: root.overlayShown ? 12 : -8
-            anchors.topMargin: root.overlayShown ? 12 : -8
+            anchors.bottomMargin: root.overlayShown ? Theme.spacingM : -Theme.spacingS
+            anchors.topMargin: root.overlayShown ? Theme.spacingM : -Theme.spacingS
             width: root.sttState === "aiError" ? 400 : 340
             height: root.sttState === "aiError" ? 156 : 72
-            radius: root.sttState === "aiError" ? 22 : height / 2
+            radius: root.sttState === "aiError" ? Theme.cornerRadius : height / 2
             color: Theme.surfaceContainer
             border.width: 1
             border.color: Qt.alpha(root.sttState === "recording" || root.sttState === "aiError" ? Theme.error : Theme.primary, 0.35)
@@ -1545,7 +1658,7 @@ PluginComponent {
             Row {
                 anchors.centerIn: parent
                 spacing: Theme.spacingM
-                visible: root.sttState === "transcribing" || root.sttState === "polishing"
+                visible: root.sttState === "preparing" || root.sttState === "transcribing" || root.sttState === "polishing"
 
                 Row {
                     spacing: 5
@@ -1564,7 +1677,7 @@ PluginComponent {
                             anchors.verticalCenter: parent.verticalCenter
 
                             SequentialAnimation on scale {
-                                running: (root.sttState === "transcribing" || root.sttState === "polishing") && overlayWindow.visible
+                                running: (root.sttState === "preparing" || root.sttState === "transcribing" || root.sttState === "polishing") && overlayWindow.visible
                                 loops: Animation.Infinite
                                 PauseAnimation { duration: bounceDot.index * 160 }
                                 NumberAnimation { from: 1; to: 1.6; duration: 240; easing.type: Easing.OutQuad }
@@ -1577,9 +1690,7 @@ PluginComponent {
                 }
 
                 StyledText {
-                    text: root.sttState === "polishing"
-                          ? "Transcribing with AI (" + root.activeAiModelShort + ")…"
-                          : "Transcribing (" + root.modelName + ")…"
+                    text: root.stateLabel()
                     color: Theme.surfaceText
                     font.pixelSize: Theme.fontSizeMedium
                     anchors.verticalCenter: parent.verticalCenter
@@ -1712,8 +1823,10 @@ PluginComponent {
             Connections {
                 target: popoutRoot.parentPopout
                 function onShouldBeVisibleChanged() {
-                    if (popoutRoot.parentPopout && popoutRoot.parentPopout.shouldBeVisible)
+                    if (popoutRoot.parentPopout && popoutRoot.parentPopout.shouldBeVisible) {
                         root.checkPreflight()
+                        root.ensureAecModule()
+                    }
                 }
             }
 
@@ -1793,12 +1906,12 @@ PluginComponent {
                         spacing: Theme.spacingS
 
                         DankButton {
-                            text: root.sttState === "recording" ? "Stop" : "Record"
+                            text: root.sttState === "preparing" ? "Cancel" : root.sttState === "recording" ? "Stop" : "Record"
                             iconName: root.sttState === "recording" ? "stop" : "mic"
                             buttonHeight: 36
                             // Local dictation needs the whisper pipeline; Stop is
                             // always allowed so an in-flight recording can end.
-                            enabled: root.sttState === "recording" || root.localReady
+                            enabled: root.sttState === "preparing" || root.sttState === "recording" || (!root.overlayActive && root.localReady)
                             onClicked: root.toggleRecording()
                         }
 
@@ -1813,7 +1926,7 @@ PluginComponent {
                             buttonSize: 36
                             // AI needs either a key (API transcription) or the
                             // local pipeline (its fallback) to be viable.
-                            enabled: root.sttState === "recording" || root.localReady || root.activeAiKey.trim().length > 0
+                            enabled: root.sttState === "preparing" || root.sttState === "recording" || (!root.overlayActive && (root.localReady || root.activeAiKey.trim().length > 0))
                             onClicked: root.toggleAiRecording()
                         }
                     }
@@ -1869,7 +1982,7 @@ PluginComponent {
                         wrapMode: Text.Wrap
                     }
 
-                    ListView {
+                    DankListView {
                         anchors.fill: parent
                         anchors.margins: Theme.spacingS
                         clip: true
