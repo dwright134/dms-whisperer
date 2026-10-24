@@ -395,7 +395,7 @@ PluginSettings {
         StyledText {
             width: parent.width
             text: settingsRoot.currentBackend === "whisper-server"
-                  ? "Download a model, then click it to load it into the running server. The server's startup default (-m in its systemd unit) is updated to match, so a restart keeps the choice."
+                  ? "Download a model, then click it to load it into the running server. To keep it after a restart, update the model in your server's own launch command or service."
                   : "Download a model, then click it to make it active."
             font.pixelSize: Theme.fontSizeSmall
             color: Theme.surfaceVariantText
@@ -1048,27 +1048,15 @@ PluginSettings {
 
     // whisper-server model swap: POST /load blocks until the new model is
     // loaded, so a 200 means it's live — only then is the choice persisted
-    // (modelPath is shared with the whisper.cpp backend, so switching between
-    // the two keeps the same model). The systemd unit's -m flag is then pointed
-    // at the same file so a server restart comes back with it; a server run
-    // outside systemd (no unit file, or no -m in it) just skips that step and
-    // keeps its own startup default. A failed load leaves the previous model
-    // loaded server-side and the previous selection here.
+    // (modelPath is shared with the whisper.cpp backend). This changes only
+    // the running server; its service and startup default belong to the user.
+    // A failed load leaves the previous selection here.
     function serverLoadModel(model) {
         const path = modelFullPath(model.name)
         const url = PluginService.loadPluginData(pluginId, "serverUrl", "http://127.0.0.1:8910")
         Proc.runCommand("whisperer.settings.serverLoad",
-                        ["sh", "-c",
-                         // The -m flag can sit on an ExecStart continuation
-                         // line, so match it on any non-comment line rather
-                         // than anchoring to ExecStart= itself.
-                         'curl -sf --max-time 300 -F "model=$1" "$2/load" >/dev/null || exit 1; '
-                         + 'u="$HOME/.config/systemd/user/whisper-server.service"; '
-                         + '[ -f "$u" ] || exit 0; '
-                         + 'grep -vE "^[[:space:]]*#" "$u" | grep -qE "(^|[[:space:]])(-m|--model)[[:space:]]" || exit 0; '
-                         + 'sed -i -E "/^[[:space:]]*#/! s#(^|[[:space:]])(-m|--model)[[:space:]]+[^[:space:]]+#\\1-m $1#" "$u" '
-                         + '&& systemctl --user daemon-reload; exit 0',
-                         "sh", path, url],
+                        ["curl", "-sf", "--max-time", "300",
+                         "--form-string", "model=" + path, url + "/load"],
                         (out, code) => {
                             if (code === 0) {
                                 PluginService.savePluginData(pluginId, "modelPath", path)
@@ -1079,7 +1067,7 @@ PluginSettings {
                                 ToastService.showError("whisper-server didn't load " + model.name + " — is the server running?")
                             }
                             detectBackends()
-                        })
+                        }, 0, 310000)
     }
 
     // ── faster-whisper model manager ────────────────────────────────────────
