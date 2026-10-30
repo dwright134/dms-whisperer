@@ -28,7 +28,7 @@ function harness() {
         Quickshell: { execDetached(command) { detached.push(command); } },
     });
     context.root = context;
-    for (const name of ['cleanupSession', 'removeSessionDirectory', 'checkRecordingReady',
+    for (const name of ['levelMonitorCommand', 'cleanupSession', 'removeSessionDirectory', 'checkRecordingReady',
         'startRecording', 'cancelRecording', 'finishCancel', 'deliver', 'noSpeech',
         'fail', 'enterAiError', 'cancelAiError', 'fallbackToLocal', 'checkPreflight', 'fasterWhisperCommand', 'duckMedia', 'restoreMedia', 'ensureAecModule']) {
         const match = source.match(new RegExp(`^    function ${name}\\([^]*?^    }`, 'm'));
@@ -268,3 +268,50 @@ test('a take directory created after widget destruction is still removed', () =>
         assert.equal(existsSync(directory), false);
     } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+function meterFixture() {
+    const pcm = Buffer.alloc(4800);
+    for (let i = 800; i < 1600; i++) pcm.writeInt16LE(i % 2 ? -1234 : 1234, i * 2);
+    for (let i = 1600; i < 2400; i++) pcm.writeInt16LE(-32768, i * 2);
+    return pcm;
+}
+
+for (const capability of ['raw', 'legacy', 'help-fails']) {
+    for (const aecActive of [false, true]) {
+        test(`level meter decodes exact peaks with ${capability}, AEC=${aecActive}`, async () => {
+            const runtime = mkdtempSync(join(tmpdir(), "whisperer-meter 'quoted-"));
+            try {
+                const pcm = meterFixture();
+                const { endianness } = await import('node:os');
+                if (endianness() === 'BE') pcm.swap16();
+                writeFileSync(join(runtime, 'pcm'), pcm);
+                writeFileSync(join(runtime, 'pw-record'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args.includes('--help')) {
+    console.log(process.env.METER_CAPABILITY === 'raw' ? '  -a, --raw RAW mode' : '  --format Sample format');
+    process.exit(process.env.METER_CAPABILITY === 'help-fails' ? 1 : 0);
+}
+fs.writeFileSync(process.env.METER_RUNTIME + '/args', JSON.stringify(args));
+const raw = process.env.METER_CAPABILITY === 'raw';
+if (args.includes('--raw') !== raw || args.at(-1) !== (raw ? '-' : process.env.METER_RUNTIME + '/level-meter.raw')) process.exit(2);
+const pcm = fs.readFileSync(process.env.METER_RUNTIME + '/pcm');
+if (raw) process.stdout.write(pcm);
+else fs.writeFileSync(args.at(-1), pcm);
+`, { mode: 0o755 });
+                const { context: c } = harness();
+                // Pass even shell metacharacters literally rather than interpolating.
+                Object.assign(c, { sessionDir: runtime, aecActive, aecSourceName: "aec ' source; $(false)" });
+                const result = run(c.levelMonitorCommand(), {
+                    PATH: `${runtime}:${process.env.PATH}`, METER_RUNTIME: runtime, METER_CAPABILITY: capability,
+                });
+                assert.equal(result.status, 0, result.stderr);
+                assert.equal(result.stderr, '');
+                assert.equal(result.stdout, '0\n1234\n32768\n');
+                const args = JSON.parse(readFileSync(join(runtime, 'args'), 'utf8'));
+                assert.equal(args.includes('--target'), aecActive);
+                if (aecActive) assert.equal(args[args.indexOf('--target') + 1], c.aecSourceName);
+            } finally { rmSync(runtime, { recursive: true, force: true }); }
+        });
+    }
+}

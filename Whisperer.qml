@@ -1037,6 +1037,22 @@ PluginComponent {
         }
     }
 
+    function levelMonitorCommand() {
+        // Probe capabilities, including distro backports. Older pw-record uses
+        // the filename extension to select libsndfile's native-endian RAW format.
+        // The per-take symlink streams to stdout and is removed by take cleanup.
+        const script = 'meter="$1/level-meter.raw"; shift; ' +
+            'if LC_ALL=C pw-record --help 2>&1 | grep -q -- "--raw"; then ' +
+            'pw-record --raw --rate 8000 --channels 1 --format s16 "$@" -; ' +
+            'else ln -s /dev/stdout "$meter" || exit 1; ' +
+            'pw-record --rate 8000 --channels 1 --format s16 "$@" "$meter"; fi | ' +
+            "od -An -v -td2 -w2 | awk 'BEGIN {p=0} {v=$1<0?-$1:$1; if(v>p)p=v; if(++n>=800){print p; p=0; n=0; fflush()}}'"
+        const command = ["sh", "-c", script, "whisperer-levels", root.sessionDir]
+        if (root.aecActive)
+            command.push("--target", root.aecSourceName)
+        return command
+    }
+
     // Live level meter: a second capture stream feeds a pipeline that prints
     // one peak sample value per 100ms (800 samples at 8kHz). Killing the sh
     // wrapper orphans the pipeline briefly; it self-destructs via SIGPIPE.
@@ -1046,11 +1062,7 @@ PluginComponent {
         // Meter the same source the recorder captures, so the waveform and the
         // adaptive noise-floor/auto-stop logic react to the cleaned audio rather
         // than to music the recording no longer contains.
-        command: ["sh", "-c",
-                  "pw-record --raw --rate 8000 --channels 1 --format s16 " +
-                  (root.aecActive ? "--target " + root.aecSourceName + " " : "") +
-                  "- | od -An -v -td2 -w2 | " +
-                  "awk '{v=$1<0?-$1:$1; if(v>p)p=v; if(++n>=800){print p; p=0; n=0; fflush()}}'"]
+        command: root.levelMonitorCommand()
         stdout: SplitParser {
             onRead: data => root.handleLevel(parseInt(data.trim(), 10) || 0)
         }
