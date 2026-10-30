@@ -1047,7 +1047,7 @@ PluginComponent {
         // adaptive noise-floor/auto-stop logic react to the cleaned audio rather
         // than to music the recording no longer contains.
         command: ["sh", "-c",
-                  "pw-record --rate 8000 --channels 1 --format s16 " +
+                  "pw-record --raw --rate 8000 --channels 1 --format s16 " +
                   (root.aecActive ? "--target " + root.aecSourceName + " " : "") +
                   "- | od -An -v -td2 -w2 | " +
                   "awk '{v=$1<0?-$1:$1; if(v>p)p=v; if(++n>=800){print p; p=0; n=0; fflush()}}'"]
