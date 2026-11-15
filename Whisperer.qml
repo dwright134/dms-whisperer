@@ -1524,10 +1524,16 @@ PluginComponent {
 
     // ── Bottom-center recording overlay ───────────────────────────────────
 
+    readonly property var focusedScreen: {
+        if (typeof CompositorService !== "undefined" && CompositorService.getFocusedScreenName())
+            return CompositorService.getFocusedScreen() || root.parentScreen
+        return root.parentScreen
+    }
+
     PanelWindow {
         id: overlayWindow
         visible: root.overlayWindowVisible
-        screen: root.parentScreen
+        screen: root.focusedScreen
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.layer: WlrLayer.Overlay
